@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# 検証用: JBoss EAP 8.1 の代わりに WildFly 35 (EAP 8.1 と同じ WildFly Core 27 系) を
+# UBI 9 の Red Hat OpenJDK 21 runtime に載せたイメージ。docker/base の BASE_IMAGE に渡す。
+#
+#   docker build -t eap-sim:latest -f test/e2e/Dockerfile.eap-sim <wildfly-35.0.1.Final.tar.gz のあるディレクトリ>
+#
+# 本番では JBoss EAP 8.1 を導入した既存のベースイメージを BASE_IMAGE に指定する。
+# =============================================================================
+ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/openjdk-21-runtime:latest
+FROM ${RUNTIME_IMAGE}
+USER root
+ARG WILDFLY_TGZ=wildfly-35.0.1.Final.tar.gz
+ADD ${WILDFLY_TGZ} /opt/
+RUN set -eux; \
+    mv /opt/wildfly-* /opt/jboss-eap; \
+    chown -R 185:0 /opt/jboss-eap; \
+    chmod -R g+rwX /opt/jboss-eap
