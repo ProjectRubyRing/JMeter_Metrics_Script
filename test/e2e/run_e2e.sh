@@ -10,8 +10,8 @@
 #      /mnt/logs・/mnt/data はホストのディレクトリ)
 #   3. 起動ログに「性能試験用メトリクス収集: 有効」が出ること
 #   4. WAR をデプロイし、並列で負荷をかける (接続プールの待ち・GC を起こす)
-#   5. cli_datasource.csv・jvm_jstat_gc.csv に行が増え、接続待ちと GC が記録されること・
-#      collector.log に ERROR が無いこと
+#   5. cli_datasource.csv・jvm_threads.csv・jvm_jstat_gc.csv に行が増え、接続待ち・スレッド数・GC が
+#      記録されること・collector.log に ERROR が無いこと
 #   6. PERF_METRICS_ENABLED=false のイメージでは収集が動かないこと
 #
 # 使い方 (Git Bash / WSL / Linux):
@@ -93,7 +93,7 @@ sleep 12
 echo "== 4. 出力の確認"
 OUT="$(ls -d "${WORK}"/mnt-logs/front/logs/intra-web/mid/2*/perf 2>/dev/null | tail -1)"
 [ -n "${OUT}" ] && ok "出力先 ${OUT}" || { ng "perf/ がない"; exit 1; }
-for f in cli_datasource jvm_jstat_gc; do
+for f in cli_datasource jvm_threads jvm_jstat_gc; do
     n=$(( $(wc -l < "${OUT}/${f}.csv" 2>/dev/null || echo 1) - 1 ))
     [ "$n" -gt 3 ] && ok "${f}.csv: ${n} 行" || ng "${f}.csv: ${n} 行"
 done
@@ -104,6 +104,9 @@ col_max() {  # file column -> 列の最大値
 [ "$(col_max "${OUT}/cli_datasource.csv" WaitCount)" -gt 0 ] && ok "接続待ち (WaitCount) を記録" || ng "WaitCount が 0 のまま"
 [ "$(col_max "${OUT}/cli_datasource.csv" InUseCount)" -ge 20 ] && ok "使用中が最大プール (20) に到達" || ng "InUseCount が 20 に届かない"
 [ "$(col_max "${OUT}/jvm_jstat_gc.csv" YGC)" -gt 0 ] && ok "GC 回数 (YGC) を記録" || ng "YGC が 0 のまま"
+live="$(col_max "${OUT}/jvm_threads.csv" live_threads)"; os="$(col_max "${OUT}/jvm_threads.csv" os_threads)"
+# OS スレッド数は JVM 内部のスレッド (GC・JIT など) を含むため、ライブスレッド数より多い
+[ "${live}" -gt 0 ] && [ "${os}" -gt "${live}" ] && ok "スレッド数を記録 (最大 ライブ ${live} / OS ${os})" || ng "スレッド数 (最大 ライブ ${live} / OS ${os})"
 grep -q '^jvm,jstat_command,' "${OUT}/perf_meta.csv" && ok "jstat の起動方法: $(sed -n 's/^jvm,jstat_command,//p' "${OUT}/perf_meta.csv")" || ng "perf_meta.csv に jstat_command がない"
 grep -q 'trustStorePassword=\*\*\*\*' "${OUT}/perf_meta.csv" && ! grep -q e2e-secret "${OUT}/perf_meta.csv" && ok "起動コマンドのパスワードを伏せ字" || ng "起動コマンドのパスワードが伏せられていない"
 grep -q ' ERROR ' "${OUT}/collector.log" && ng "collector.log に ERROR" || ok "collector.log に ERROR なし"

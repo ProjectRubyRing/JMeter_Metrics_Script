@@ -75,6 +75,7 @@ for SH in "${SHELLS[@]}"; do
   D=$(own_dir)
   check "rc=0・JBoss を起動" '[ $RC -eq 0 ] && grep -qx STARTED <<<"$OUT"'
   check "起動ログに有効の枠" 'grep -q "性能試験用メトリクス収集: 有効" <<<"$OUT"'
+  check "起動ログに収集対象 (DB 接続プール・スレッド数・jstat)" 'grep -q "DB 接続プール (cli_datasource.csv)・スレッド数 (jvm_threads.csv)" <<<"$OUT" && grep -q "ヒープ・GC (jvm_jstat_gc.csv)" <<<"$OUT"'
   check "出力先は current ではなく実体パスの perf/" 'grep -q "出力先 : $D/perf\$" <<<"$OUT" && [ -d "$D/perf" ]'
   check "統計の引数をコマンド直後へ (pin・元の引数はその後ろ)" '[ "$(args)" = "ARG[-Dwildfly.datasources.statistics-enabled=true]|ARG[-Djboss.server.log.dir=$D]|ARG[-b]|ARG[0.0.0.0]|ARG[-Dfoo=a b]|" ]'
   check "preflight OK 行に統計の引数" 'grep -q "preflight OK. starting: $JH/bin/standalone.sh -Dwildfly.datasources.statistics-enabled=true -Djboss.server.log.dir=$D" <<<"$OUT"'

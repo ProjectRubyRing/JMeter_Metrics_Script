@@ -32,7 +32,7 @@
       { "name": "CONFIG_SEED_MODE", "value": "overwrite" },
 
       // ★ 任意 (指定しなければイメージの既定)
-      { "name": "PERF_INTERVAL",       "value": "10" },            // ① DB 接続プール・② jstat の間隔 (秒)
+      { "name": "PERF_INTERVAL",       "value": "10" },            // ① DB 接続プール・スレッド数、② jstat の間隔 (秒)
       { "name": "PERF_TZ",             "value": "Asia/Tokyo" }     // CSV の timestamp 列のタイムゾーン
       // { "name": "PERF_METRICS_ENABLED", "value": "false" }      // 性能試験用イメージのまま収集だけ止める
     ],

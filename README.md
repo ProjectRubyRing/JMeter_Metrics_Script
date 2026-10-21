@@ -1,13 +1,14 @@
 # JMeter_Metrics_Script — 性能試験用メトリクス収集 (ECS / Fargate + JBoss EAP 8.1)
 
 JMeter で性能試験をしている間、ECS タスク (Fargate) のコンテナ
-(UBI 9.8 + Red Hat build of OpenJDK 21 + JBoss EAP 8.1) の中で次の 2 つだけを一定間隔で取り、
+(UBI 9.8 + Red Hat build of OpenJDK 21 + JBoss EAP 8.1) の中で次のメトリクスだけを一定間隔で取り、
 `readonlyRootFilesystem=true` でも書き込める EFS 上のタスク専用ディレクトリへ CSV で出力します。
 出力は Windows 11 の PowerShell でモノトーンの Excel レポートにできます。
 
 | 区分 | 取得方法 | 内容 | 出力 |
 |---|---|---|---|
 | ① | jboss-cli (常駐セッション 1 つ) | DB 接続プール: データソース / XA データソースごとの使用中・アクティブ・アイドル・待ち・取得失敗・取得 / 待ち / 使用時間 (`statistics=pool`) と最小 / 最大プール・取得タイムアウト | `cli_datasource.csv` |
+| ① | jboss-cli + `/proc` | スレッド数: ライブスレッド数 (JVM が数える Java のスレッド。platform-mbean の `thread-count`) と、同じ時刻の OS スレッド数 (カーネルから見た JBoss プロセスのスレッド。`/proc/<pid>/status` の `Threads`) | `jvm_threads.csv` |
 | ② | jstat (常駐 1 つ) | ヒープ各領域 (Eden・Survivor・Old・メタスペース) の容量・使用量、GC 回数・時間 (`jstat -gc`) | `jvm_jstat_gc.csv` |
 
 - **性能試験用の実装は `docker/base/perf-metrics.sh` の 1 ファイル**にまとめています。
@@ -17,10 +18,10 @@ JMeter で性能試験をしている間、ECS タスク (Fargate) のコンテ�
 
 ```
 [perf-metrics] ======================================================================
-[perf-metrics]  性能試験用メトリクス収集: 有効  (perf-metrics.sh 2.0.0 / PERF_METRICS_ENABLED=true)
+[perf-metrics]  性能試験用メトリクス収集: 有効  (perf-metrics.sh 2.1.0 / PERF_METRICS_ENABLED=true)
 [perf-metrics]  出力先 : /mnt/logs/front/logs/intra-web/mid/20261021003859-vbkgervr/perf
 [perf-metrics]           (JBoss のログと同じタスク専用ディレクトリ。最後に起動したタスクは mid/current/perf から辿れます)
-[perf-metrics]  ① jboss-cli : 10 秒間隔  DB 接続プール (cli_datasource.csv)
+[perf-metrics]  ① jboss-cli : 10 秒間隔  DB 接続プール (cli_datasource.csv)・スレッド数 (jvm_threads.csv)
 [perf-metrics]  ② jstat     : 10 秒間隔  ヒープ・GC (jvm_jstat_gc.csv)
 [perf-metrics]  統計の有効化: -Dwildfly.datasources.statistics-enabled=true を standalone.sh へ追加
 [perf-metrics]  作業ディレクトリ: /tmp/perf-metrics   状態確認: perf-metrics.sh status (ECS Exec で実行)
@@ -87,7 +88,7 @@ docker build -t intra-web-front:latest \
 同じ JDK の `java -m jdk.jcmd/sun.tools.jstat.Jstat` で起動します。
 
 ```
-[perf-metrics] ビルド時の確認 (perf-metrics.sh 2.0.0)
+[perf-metrics] ビルド時の確認 (perf-metrics.sh 2.1.0)
 [perf-metrics]   awk: /usr/bin/awk
 [perf-metrics]   mkfifo: /usr/bin/mkfifo
 [perf-metrics]   jstat: /usr/lib/jvm/java-21-openjdk/bin/java -m jdk.jcmd/sun.tools.jstat.Jstat
@@ -148,8 +149,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\report\New-PerfMetricsRepo
 | `-Open` | 作成後に開く |
 
 シート: サマリー (所見・主要指標の最大 / 95% 値 / 平均 / 最小・データソース別・収集情報の抜粋) /
-グラフ (データソースごとに接続数・待ち / 取得失敗、ヒープ使用量・GC 回数・GC 時間・メタスペース。全グラフで時間軸を共通化) /
-DB接続プール / ヒープ・GC（jstat） / 収集情報 / 凡例。
+グラフ (データソースごとに接続数・待ち / 取得失敗、ライブ / OS スレッド数、ヒープ使用量・GC 回数・GC 時間・メタスペース。全グラフで時間軸を共通化) /
+DB接続プール / スレッド数 (ライブ・OS・その差) / ヒープ・GC（jstat） / 収集情報 / 凡例。
 フォント Meiryo UI、黒・グレーのモノトーン、線の種類で系列を区別、見出し固定・オートフィルター・
 濃淡 (使用率 80% 以上・待ち・取得失敗・Full GC・Old 使用率 85% 以上・GC 時間率 5% 以上)・データバー付き、A4 横で印刷できます。
 
@@ -160,6 +161,7 @@ DB接続プール / ヒープ・GC（jstat） / 収集情報 / 凡例。
 | ファイル | 内容 |
 |---|---|
 | `cli_datasource.csv` | ① データソースごとに 1 行 / 回。`ds_type` (ds / xa)・`ds_name`・`jndi_name`・`statistics_enabled`・`min_pool_size`・`max_pool_size`・`blocking_timeout_ms` と、`statistics=pool` の `ActiveCount` `AvailableCount` `InUseCount` `IdleCount` `MaxUsedCount` `WaitCount` `MaxWaitCount` `BlockingFailureCount` `TimedOut` `CreatedCount` `DestroyedCount` と取得 / 待ち / 使用 / 作成 / プール時間 (Average / Max / Total、ミリ秒) |
+| `jvm_threads.csv` | ① 1 行 / 回。`pid`・`live_threads` (ライブスレッド数。デーモンを含む)・`os_threads` (OS スレッド数。GC・JIT コンパイラなど JVM 内部のスレッドを含むため、ライブより多い)。jboss-cli が応答しない間も、ライブを空欄にして OS スレッド数を記録する |
 | `jvm_jstat_gc.csv` | ② `jstat -gc -t` の各行 (`uptime_s` と S0C … GCT。容量・使用量は KB、GC 時間は秒) |
 | `perf_meta.csv` | 収集条件 (版・開始時刻・UTC オフセット・間隔・LOG_ID・起動コマンド・jboss-cli の接続先・jstat の起動方法など) |
 | `collector.log` | 収集プロセスのログ (WARN / ERROR は CloudWatch Logs にも出る) |
@@ -176,7 +178,7 @@ perf_meta.csv の起動コマンドでは、`password=` などの値を `*******
 |---|---|---|
 | `PERF_INTERVAL` | 10 | ① ② の既定の間隔 (秒) |
 | `PERF_CLI_INTERVAL` / `PERF_JSTAT_INTERVAL` | `PERF_INTERVAL` | 個別の間隔 |
-| `PERF_COLLECTORS` | `cli jstat` | 動かす収集 |
+| `PERF_COLLECTORS` | `cli jstat` | 動かす収集 (`cli` = DB 接続プールとスレッド数、`jstat` = ヒープ・GC) |
 | `PERF_TZ` | (コンテナの TZ) | CSV の timestamp のタイムゾーン (例 `Asia/Tokyo`。tzdata が無くても JST-9 で代替) |
 | `PERF_ENABLE_STATISTICS` | true | `standalone.sh` の直後に `-Dwildfly.datasources.statistics-enabled=true` を足す (標準構成の式 `${wildfly.datasources.statistics-enabled:...}` を使うデータソースは起動時から統計が有効) |
 | `PERF_CLI_ENABLE_DS_STATS` | true | それでもプール統計が無効なデータソースを実行時に有効化 (statistics=pool の実行時属性。設定ファイルは変わらず、サーバー状態も running のまま) |
@@ -186,6 +188,13 @@ perf_meta.csv の起動コマンドでは、`password=` などの値を `*******
 | `PERF_WAIT_TIMEOUT` | 900 | JBoss の JVM・管理インタフェースを待つ秒数 |
 | `PERF_OUTPUT_DIR` / `PERF_WORK_DIR` | (自動) | 出力先 / 作業ディレクトリを明示するとき |
 | `PERF_METRICS_ENABLED` | ビルド引数の値 | `false` にすると性能試験用イメージのまま収集だけ止められる |
+
+### 2.1.0 での追加
+
+- ライブスレッド数と OS スレッド数を `jvm_threads.csv` に出力するようにしました (① の jboss-cli と同じ回に取得)。
+  レポートに「スレッド数」シート・グラフ・主要指標を追加しました。
+- スレッドが枯渇して管理インタフェースが応答しないときの手がかりになるよう、jboss-cli が応答しない間も
+  OS スレッド数は記録します (接続を試し直す間隔のため、その間は最長 25 秒前後おきになります)。
 
 ### 1.0.0 からの変更 (2.0.0 で取得範囲を絞ってスリム化)
 
@@ -226,7 +235,8 @@ git apply <このリポジトリ>/patches/container_link_method.patch           
 ## 6. 負荷と注意事項
 
 - **収集プロセス自身の負荷** (WildFly 35 / 10 秒間隔・40 並列の負荷中に測定。1 コア = 100%):
-  jboss-cli 常駐 CPU 0.4% 前後・RSS 約 130MB、jstat 常駐 CPU 0.4% 前後・RSS 約 45MB。
+  jboss-cli 常駐 CPU 0.4〜0.6%・RSS 約 125MB、jstat 常駐 CPU 0.4〜0.5%・RSS 約 45MB (2 回の測定の幅。いずれも 1% 未満)。
+  スレッド数は jboss-cli の読み取りが 1 つ増えるのと、`/proc` のファイルを 1 つ読むだけです。
 - jboss-cli は常駐セッション (FIFO で命令を送る) なので、間隔ごとに JVM を起動しません。
   JBoss が再起動しても jboss-cli は自分で再接続し、jstat は新しい JVM に付け直して収集を続けます
   (止まっていた間は行が抜け、collector.log に失敗と再開が出ます)。
@@ -239,11 +249,11 @@ git apply <このリポジトリ>/patches/container_link_method.patch           
 
 | 試験 | 結果 |
 |---|---|
-| `test/unit/perf_hook_test.sh` (dash / bash --posix / busybox sh) | PASS=105 FAIL=0 |
-| `test/e2e/run_e2e.sh 90` (Docker、--read-only・uid 185、WildFly 35、40 並列の負荷) | 全項目 OK (接続プールの上限到達と待ち・GC・パスワードの伏せ字・status / stop・PERF_METRICS_ENABLED=false で収集しないこと) |
-| ローカルの WildFly 35 + OpenJDK 21 で直接実行 | 設定付きデータソース・XA データソースの取得、プール統計の実行時有効化、JBoss の再起動後の再接続、status / stop / pack を確認 |
+| `test/unit/perf_hook_test.sh` (dash / bash --posix / busybox sh) | PASS=108 FAIL=0 |
+| `test/e2e/run_e2e.sh 90` (Docker、--read-only・uid 185、WildFly 35、40 並列の負荷) | 全項目 OK (接続プールの上限到達と待ち・GC・スレッド数 (OS > ライブ)・パスワードの伏せ字・status / stop・PERF_METRICS_ENABLED=false で収集しないこと) |
+| ローカルの WildFly 35 + OpenJDK 21 で直接実行 | 設定付きデータソース・XA データソースの取得、プール統計の実行時有効化、JBoss の再起動後の再接続、status / stop / pack を確認。JBoss を 40 秒止めた (SIGSTOP) 間も OS スレッド数が記録され、再開後に元の間隔へ戻ることを確認 |
 | 応答の解析 (awk) | mawk・busybox awk・gawk (UBI 9) で同じ結果 |
-| レポート (PowerShell 7.4) | 1.0.0 のレポートと共通の列の値が全行一致、LibreOffice で開いて PDF の体裁を確認、tar.gz 入力・-From / -To・片方の CSV だけの場合を確認 |
+| レポート (PowerShell 7.4) | 1.0.0 のレポートと共通の列の値が全行一致、LibreOffice で開いて PDF の体裁を確認、tar.gz 入力・-From / -To・片方の CSV だけの場合・jvm_threads.csv の無い 2.0.0 の出力を確認 |
 
 ```sh
 bash test/unit/perf_hook_test.sh
@@ -252,8 +262,8 @@ WILDFLY_TGZ_DIR=<wildfly-35.0.1.Final.tar.gz のあるディレクトリ> WORK=<
 ```
 
 **未確認のこと:** 実際の ECS / Fargate と JBoss EAP 8.1 の実機では動かしていません
-(EAP 8.1 と同じ WildFly Core 27 系の WildFly 35 で確認)。2.0.0 の結合試験は、registry.access.redhat.com に
+(EAP 8.1 と同じ WildFly Core 27 系の WildFly 35 で確認)。2.0.0 / 2.1.0 の結合試験は、registry.access.redhat.com に
 接続できない環境で行ったため、openjdk-21-runtime の代わりに ubi9-minimal + OpenJDK 21 (Temurin 21.0.5。runtime
-イメージと同じく jstat の実行ファイルを削除) を土台にしています。2.0.0 のレポートは Windows PowerShell 5.1 と Excel では
+イメージと同じく jstat の実行ファイルを削除) を土台にしています。2.0.0 以降のレポートは Windows PowerShell 5.1 と Excel では
 まだ開いていません (PowerShell だけの処理は 1.0.0 で 5.1 の動作を確認済みの部分と同じです)。
 性能試験の前に、検証環境で 1 度起動ログと `perf-metrics.sh status`、レポートの作成を確認してください。

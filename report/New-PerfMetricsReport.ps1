@@ -4,12 +4,13 @@
     モノトーンの Excel レポート (.xlsx) に変換します (Windows 11 / PowerShell 5.1・7)。
 
 .DESCRIPTION
-    ① jboss-cli の DB 接続プール (cli_datasource.csv) と ② jstat -gc (jvm_jstat_gc.csv) を
-    読み込み、次のシートを持つブックを作成します。
+    ① jboss-cli の DB 接続プール (cli_datasource.csv)・スレッド数 (jvm_threads.csv) と
+    ② jstat -gc (jvm_jstat_gc.csv) を読み込み、次のシートを持つブックを作成します。
 
       サマリー             所見・主要指標 (最大 / 95% 値 / 平均 / 最小)・データソース別・収集情報の抜粋
-      グラフ               DB 接続プール (データソース別) とヒープ・GC の推移 (共通の時間軸)
+      グラフ               DB 接続プール (データソース別)・スレッド数・ヒープ・GC の推移 (共通の時間軸)
       DB接続プール         データソース別の時系列 (使用率・区間の待ち / 取得失敗など)
+      スレッド数           ライブスレッド数 (JVM) と OS スレッド数 (カーネルから見た JBoss プロセス)
       ヒープ・GC（jstat）  各領域の使用量・容量、区間の GC 回数・時間・GC 時間率
       収集情報 / 凡例
 
@@ -22,7 +23,7 @@
 
 .PARAMETER InputPath
     次のいずれか
-      ・perf/ ディレクトリ (perf_meta.csv・cli_datasource.csv・jvm_jstat_gc.csv を含む)
+      ・perf/ ディレクトリ (perf_meta.csv・cli_datasource.csv・jvm_threads.csv・jvm_jstat_gc.csv を含む)
       ・その親ディレクトリ (mid/ など)。下にある perf/ をすべて探し、1 つずつブックを作成します
       ・perf-metrics.sh pack で作った .tar.gz / .tar、または perf/ を固めた .zip
 
@@ -99,7 +100,7 @@ param(
 )
 if (-not $Title) { $Title = '性能試験メトリクス レポート' }
 $ErrorActionPreference = 'Stop'
-$Version = '2.0.0'
+$Version = '2.1.0'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -395,7 +396,7 @@ $PerfRpt = [PerfRpt]
 # 入力 (ディレクトリ / 親ディレクトリ / .zip / .tar.gz)
 #------------------------------------------------------------------------------
 $TempDirs = New-Object System.Collections.Generic.List[string]
-$DataFiles = @('perf_meta.csv', 'cli_datasource.csv', 'jvm_jstat_gc.csv')
+$DataFiles = @('perf_meta.csv', 'cli_datasource.csv', 'jvm_threads.csv', 'jvm_jstat_gc.csv')
 function Test-PerfDir([string]$d) {
     foreach ($f in $DataFiles) { if (Test-Path -LiteralPath (Join-Path $d $f)) { return $true } }
     return $false
@@ -430,7 +431,7 @@ function Resolve-PerfDirs([string]$path) {
             if (-not $found.Contains($f.DirectoryName)) { $found.Add($f.DirectoryName) }
         }
     }
-    if ($found.Count -eq 0) { throw "perf-metrics の出力 (perf_meta.csv / cli_datasource.csv / jvm_jstat_gc.csv) が見つかりません: $path" }
+    if ($found.Count -eq 0) { throw "perf-metrics の出力 (perf_meta.csv / cli_datasource.csv / jvm_threads.csv / jvm_jstat_gc.csv) が見つかりません: $path" }
     return , ($found.ToArray() | Sort-Object)
 }
 
@@ -716,7 +717,7 @@ function Build-Report([string]$dir, [string]$outPath) {
 
     # ---- CSV ----
     $TB = @{}
-    foreach ($n in @('cli_datasource', 'jvm_jstat_gc')) {
+    foreach ($n in @('cli_datasource', 'jvm_threads', 'jvm_jstat_gc')) {
         $t = Read-PerfCsv $dir ($n + '.csv')
         if ($null -ne $t -and $t.Rows.Count -gt 0) { $TB[$n] = $t; Write-Info ("読み込み: {0}.csv ({1:N0} 行)" -f $n, $t.Rows.Count) }
     }
@@ -809,6 +810,32 @@ function Build-Report([string]$dir, [string]$outPath) {
         }
         Fix-Ranges $sh; $Sheets.Add($sh); $shDS = $sh
         $script:DSC = @{ In = $cIn; Ac = $cAc; Mx = $cMx; Wd = $cWd; Fd = $cFd }
+    }
+
+    # ==== スレッド数 (ライブ / OS) ====
+    $shTH = $null
+    if ($TB.ContainsKey('jvm_threads')) {
+        Write-Info '集計: スレッド数'
+        $t = $TB['jvm_threads']
+        $sh = New-Sheet 'スレッド数' 'スレッド数（ライブ / OS）' ('① ライブスレッドは jboss-cli で読む platform-mbean の thread-count (JVM が数える Java のスレッド。デーモンを含む)、OS スレッドは同じ時刻に読む /proc/<pid>/status の Threads (カーネルから見た JBoss プロセスのスレッド。GC・JIT コンパイラなど JVM 内部のスレッドを含む) です。ライブスレッドが空欄の行は jboss-cli が応答しなかった回です。') 1
+        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
+        $cP = Add-Col $sh '基本' 'PID' 'pid' 'int' 8
+        $cL = Add-Col $sh 'スレッド数' 'ライブ（JVM）' 'live_threads' 'int' 11
+        $cO = Add-Col $sh 'スレッド数' 'OS' 'os_threads' 'int' 9
+        $cD = Add-Col $sh 'スレッド数' '差（OS − ライブ）' 'os_threads - live_threads' 'int' 13
+        $lL = NewList; $lO = NewList
+        foreach ($r in $t.Rows) {
+            $lv = $PerfRpt::GD($t, $r, 'live_threads'); $os = $PerfRpt::GD($t, $r, 'os_threads')
+            $vals = New-Object 'object[]' $sh.Cols.Count
+            $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::GD($t, $r, 'epoch'))); $vals[$cP - 1] = $PerfRpt::GD($t, $r, 'pid')
+            $vals[$cL - 1] = $lv; $vals[$cO - 1] = $os
+            if ($null -ne $lv -and $null -ne $os) { $vals[$cD - 1] = $os - $lv }
+            $PerfRpt::AddV($lL, $lv); $PerfRpt::AddV($lO, $os)
+            Add-Row $sh $vals ''
+        }
+        Fix-Ranges $sh; $Sheets.Add($sh); $shTH = $sh
+        $KPI['thLive'] = Stat $lL; $KPI['thOs'] = Stat $lO
+        $script:THC = @{ L = $cL; O = $cO }
     }
 
     # ==== ヒープ・GC (jstat -gc) ====
@@ -910,6 +937,10 @@ function Build-Report([string]$dir, [string]$outPath) {
             Add-Chart ($dn + '：接続数') '接続数' '#,##0' @((Sr '使用中' $shDS $c.In $g), (Sr 'アクティブ' $shDS $c.Ac $g), (Sr '最大プール' $shDS $c.Mx $g))
             Add-Chart ($dn + '：待ち・取得失敗（区間）') '件' '#,##0' @((Sr '待ち' $shDS $c.Wd $g), (Sr '取得失敗' $shDS $c.Fd $g))
         }
+    }
+    if ($null -ne $shTH) {
+        Add-ChartSection 'スレッド数'
+        Add-Chart 'スレッド数（ライブ / OS）' 'スレッド数' '#,##0' @((Sr 'ライブスレッド（JVM）' $shTH $script:THC.L $null), (Sr 'OS スレッド' $shTH $script:THC.O $null))
     }
     if ($null -ne $shJS) {
         Add-ChartSection 'ヒープ・GC（jstat）'
@@ -1045,6 +1076,8 @@ function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [strin
     foreach ($d in $dsSum) {
         KRow 'DB 接続プール' ($d.Name + ' 使用中') $d.In '接続' ('最大プール ' + $d.Max + '・待ち ' + (Fmt $d.Wait '#,0') + ' 件・取得失敗 ' + (Fmt $d.Fail '#,0') + ' 件') 'int'
     }
+    if ($null -ne $KPI['thLive']) { KRow 'スレッド数' 'ライブスレッド数（JVM）' $KPI['thLive'] 'スレッド' 'JVM が数える Java のスレッド (デーモンを含む)' 'int' }
+    if ($null -ne $KPI['thOs']) { KRow 'スレッド数' 'OS スレッド数' $KPI['thOs'] 'スレッド' 'カーネルから見た JBoss プロセスのスレッド (GC・JIT など JVM 内部のスレッドを含む)' 'int' }
     if ($null -ne $KPI['jsHeap']) { KRow 'ヒープ（jstat）' 'ヒープ使用量' $KPI['jsHeap'] 'MB' ('容量 最大 ' + (Fmt $KPI['jsHcMax'] '#,0') + ' MB') 'dec1' }
     if ($null -ne $KPI['jsOld']) { KRow 'ヒープ（jstat）' 'Old 使用量' $KPI['jsOld'] 'MB' ('Old 使用率 最大 ' + (Fmt ($KPI['jsOldP'].Max * 100) '0.0') + '%') 'dec1' }
     if ($null -ne $KPI['jsMeta']) { KRow 'ヒープ（jstat）' 'メタスペース使用量' $KPI['jsMeta'] 'MB' '' 'dec1' }
@@ -1150,6 +1183,7 @@ B|
 H|収集の方法 (perf-metrics.sh)
 TH|区分|取得方法|出力
 T|① jboss-cli|jboss-cli.sh を 1 つ常駐させ (FIFO で命令を送る)、データソース / XA データソースの statistics=pool と最小 / 最大プール等の設定を間隔ごとに読む。読み取りだけで設定は変えない (プール統計だけは実行時属性で有効化)|cli_datasource.csv
+T|① スレッド数|同じ回に jboss-cli で platform-mbean の thread-count を読み、続けて /proc/<JBoss の PID>/status の Threads を読む。jboss-cli が応答しない間も OS スレッド数は記録する|jvm_threads.csv
 T|② jstat|jstat -gc -t <pid> <間隔> を 1 つ常駐させ、各行に時刻を付ける (runtime イメージに jstat が無い場合は java -m jdk.jcmd で起動)|jvm_jstat_gc.csv
 B|
 H|主な項目
@@ -1158,6 +1192,8 @@ T|使用中 / アクティブ / アイドル|InUseCount / ActiveCount / IdleCoun
 T|使用率|InUseCount ÷ 最大プール|最大プール (max-pool-size) が未設定のときは既定値 20 で計算
 T|待ち / 取得失敗|WaitCount / BlockingFailureCount|空き接続を待った取得要求 / 取得タイムアウト (blocking-timeout-wait-millis 超過。アプリでは IJ000453 等)
 T|平均取得 / 最大待ち|AverageGetTime / MaxWaitTime|接続の取得時間 (待ちを含む) / 空きを待った最大時間 (ミリ秒。統計の有効化以降の累積値)
+T|ライブスレッド数|thread-count (platform-mbean)|JVM が数える Java のスレッド数 (デーモンを含む)。jconsole の「ライブ・スレッド」と同じ値
+T|OS スレッド数|/proc/<pid>/status の Threads|カーネルから見た JBoss プロセスのスレッド数。GC・JIT コンパイラなど JVM 内部のスレッドを含むため、ライブスレッド数より多い。差が急に増えるときは JVM 内部 (GC スレッド等) の増加を疑う
 T|ヒープ (jstat)|EU + S0U + S1U + OU|Eden・Survivor・Old の使用量の合計。容量は EC + S0C + S1C + OC
 T|GC 時間率|GCT の増分 ÷ 経過秒|アプリが GC で止まっていた時間の割合 (G1 の Concurrent は並行処理の停止部分)。目安 5% 未満
 B|
