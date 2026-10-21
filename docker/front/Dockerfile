@@ -91,7 +91,7 @@ RUN ls -l /webapp/webapp9mf02/ /opt/jboss-eap/standalone/ | grep -E ' logs| log|
 
 # --- 4. 性能試験用メトリクス収集 (ビルド引数で有効化 / 無効化) -----------------
 #   --build-arg PERF_METRICS_ENABLED=true  : perf-metrics.sh を残し、起動時に収集を始める
-#                                           (DB 接続プールと jstat。追加のパッケージは不要)。
+#                                           (DB 接続プール・スレッド数と jstat。追加のパッケージは不要)。
 #   --build-arg PERF_METRICS_ENABLED=false : (既定) perf-metrics.sh を削除する。本番用。
 #   --build-arg PERF_INTERVAL=10           : 取得間隔の既定 (秒)。タスク定義の environment
 #                                           (PERF_INTERVAL・PERF_CLI_INTERVAL など) でも上書きできる。

@@ -98,7 +98,7 @@ diff --git a/docker/base/perf-metrics.sh b/docker/base/perf-metrics.sh
 new file mode 100755
 --- /dev/null
 +++ b/docker/base/perf-metrics.sh
-@@ -0,0 +1,898 @@
+@@ -0,0 +1,919 @@
 +#!/bin/sh
 +# =============================================================================
 +# perf-metrics.sh
@@ -108,6 +108,8 @@ new file mode 100755
 +# 書き込める EFS 上のタスク専用ディレクトリへ CSV で書き出す。
 +#
 +#   ① jboss-cli : DB 接続プール (データソースごとの statistics=pool と最小 / 最大プール)
++#                 ライブスレッド数 (JVM が数えるスレッド数) と、同じ時刻の OS スレッド数
++#                 (カーネルから見た JBoss プロセスのスレッド数。/proc/<pid>/status の Threads)
 +#   ② jstat     : ヒープ各領域の容量・使用量と GC 回数・時間 (jstat -gc)
 +#
 +# 性能試験用の実装はこの 1 ファイルにまとめている。
@@ -132,6 +134,7 @@ new file mode 100755
 +#
 +# 【出力ファイル】 (UTF-8・LF・1 行目が見出しの CSV。timestamp はコンテナの TZ、epoch は UNIX 秒)
 +#   cli_datasource.csv   ① データソース別 接続プール統計 (statistics=pool) と最小 / 最大プール
++#   jvm_threads.csv      ① ライブスレッド数・OS スレッド数 (jboss-cli が応答しないときも OS スレッド数は記録)
 +#   jvm_jstat_gc.csv     ② jstat -gc (容量・使用量は KB、GC 時間は秒)
 +#   perf_meta.csv        収集条件 (category,key,value)
 +#   collector.log        収集プロセスのログ
@@ -147,7 +150,7 @@ new file mode 100755
 +# 【設定】 (環境変数。ビルド時の ENV・タスク定義の environment のどちらでも指定できる)
 +#   PERF_METRICS_ENABLED     true | false     収集するか (ビルド引数から ENV に焼き込む)
 +#   PERF_INTERVAL            10               ① ② の既定の間隔 (秒)
-+#   PERF_CLI_INTERVAL        PERF_INTERVAL    ① jboss-cli の間隔 (秒)
++#   PERF_CLI_INTERVAL        PERF_INTERVAL    ① jboss-cli (DB 接続プール・スレッド数) の間隔 (秒)
 +#   PERF_JSTAT_INTERVAL      PERF_INTERVAL    ② jstat の間隔 (秒)
 +#   PERF_COLLECTORS          "cli jstat"      動かす収集 (空白区切り)
 +#   PERF_OUTPUT_DIR          (自動)           出力先を明示するとき
@@ -174,7 +177,7 @@ new file mode 100755
 +#     ため、トップレベルでは関数と既定値の定義しか行わない。
 +# =============================================================================
 +
-+PERF_METRICS_VERSION="2.0.0"
++PERF_METRICS_VERSION="2.1.0"
 +
 +# --- 既定値 (エントリポイントから読み込まれても安全な代入だけ) ------------------
 +: "${PERF_METRICS_ENABLED:=false}"
@@ -507,7 +510,7 @@ new file mode 100755
 +    pm_banner_line " 性能試験用メトリクス収集: 有効  (perf-metrics.sh ${PERF_METRICS_VERSION} / PERF_METRICS_ENABLED=true)"
 +    pm_banner_line " 出力先 : ${PM_OUT}"
 +    pm_banner_line "          (${PM_OUT_NOTE}。最後に起動したタスクは mid/current/perf から辿れます)"
-+    pm_banner_line " ① jboss-cli : ${PERF_CLI_INTERVAL} 秒間隔$(_pm_off cli)  DB 接続プール (cli_datasource.csv)"
++    pm_banner_line " ① jboss-cli : ${PERF_CLI_INTERVAL} 秒間隔$(_pm_off cli)  DB 接続プール (cli_datasource.csv)・スレッド数 (jvm_threads.csv)"
 +    pm_banner_line " ② jstat     : ${PERF_JSTAT_INTERVAL} 秒間隔$(_pm_off jstat)  ヒープ・GC (jvm_jstat_gc.csv)"
 +    if [ -n "${PERF_SERVER_OPTS}" ]; then
 +        pm_banner_line " 統計の有効化: ${PERF_SERVER_OPTS} を standalone.sh へ追加"
@@ -539,7 +542,7 @@ new file mode 100755
 +}
 +
 +# =============================================================================
-+# ① jboss-cli : DB 接続プール
++# ① jboss-cli : DB 接続プール・スレッド数
 +# =============================================================================
 +# jboss-cli は常駐セッション (FIFO で命令を送る) を 1 つだけ起動し、間隔ごとに JVM を
 +# 起動し直すことはしない (起動のたびに CPU を 1 秒以上使うため)。取得は管理モデルの
@@ -547,6 +550,7 @@ new file mode 100755
 +
 +PM_DS_POOL_COLS="ActiveCount,AvailableCount,InUseCount,IdleCount,MaxUsedCount,WaitCount,MaxWaitCount,BlockingFailureCount,TimedOut,CreatedCount,DestroyedCount,AverageGetTime,MaxGetTime,TotalGetTime,AverageBlockingTime,MaxWaitTime,TotalBlockingTime,AverageUsageTime,MaxUsageTime,TotalUsageTime,AverageCreationTime,MaxCreationTime,TotalCreationTime,AveragePoolTime,MaxPoolTime,TotalPoolTime"
 +PM_DS_HEADER="timestamp,epoch,ds_type,ds_name,jndi_name,statistics_enabled,min_pool_size,max_pool_size,blocking_timeout_ms,${PM_DS_POOL_COLS}"
++PM_THR_HEADER="timestamp,epoch,pid,live_threads,os_threads"
 +
 +# 応答 (DMR 形式) をデータソース 1 つにつき 1 行の CSV にする。
 +# 応答は「PERF_B <ds|xa>.pool」「PERF_B <ds|xa>.attr.<属性名>」で区切られ、ワイルドカードの
@@ -608,7 +612,8 @@ new file mode 100755
 +    esac
 +}
 +
-+# 1 回分の問い合わせ: プール統計と、使用率の計算に使う設定 (パスワード等を読まないよう属性ごと)
++# 1 回分の問い合わせ: プール統計と、使用率の計算に使う設定 (パスワード等を読まないよう属性ごと)、
++# 最後にライブスレッド数 (OS スレッド数を読む直前に取るため最後に置く)
 +pm_cli_sample_block() {
 +    for _pm_t in ds xa; do
 +        if [ "${_pm_t}" = ds ]; then _pm_r=data-source; else _pm_r=xa-data-source; fi
@@ -617,6 +622,19 @@ new file mode 100755
 +            pm_cli_q "${_pm_t}.attr.${_pm_a}" "/subsystem=datasources/${_pm_r}=*:read-attribute(name=${_pm_a},resolve-expressions=true)"
 +        done
 +    done
++    pm_cli_q thr.live "/core-service=platform-mbean/type=threading:read-attribute(name=thread-count)"
++}
++
++# スレッド数を 1 行書く。jboss-cli が応答しなかった回もライブスレッド数を空欄にして書く
++# (スレッドが枯渇して管理インタフェースが応答しないときこそ OS スレッド数が手がかりになるため)。
++#   live_threads : JVM が数える Java のスレッド数 (platform-mbean の thread-count。デーモンを含む)
++#   os_threads   : カーネルから見た JBoss プロセスのスレッド数 (/proc/<pid>/status の Threads)。
++#                  GC・JIT コンパイラなど JVM 内部のスレッドも含むため、ライブスレッド数より多い
++pm_threads_row() {
++    _pm_live="$(awk '/^PERF_B /{b=$2; next} /^PERF_/{b=""; next} b=="thr.live" && /^ *"result" => [0-9]/{sub(/^ *"result" => /, ""); print; exit}' "${PM_W}/cli.out" 2>/dev/null)"
++    pm_jboss_alive || PM_JPID="$(pm_find_jboss_pid)" || return 0
++    _pm_os="$(sed -n 's/^Threads:[[:space:]]*//p' "/proc/${PM_JPID}/status" 2>/dev/null)"
++    printf '%s,%s,%s,%s,%s\n' "${PM_TS}" "${PM_EPOCH}" "${PM_JPID}" "${_pm_live}" "${_pm_os}" >> "${PM_OUT}/jvm_threads.csv"
 +}
 +
 +# jboss-cli.sh を、サーバーと同じ java・小さなヒープで起動する (サブシェルから exec)
@@ -752,6 +770,7 @@ new file mode 100755
 +    pm_cli_sample_block > "${PM_W}/sample.cli"
 +    _pm_csv="${PM_OUT}/cli_datasource.csv"
 +    [ -s "${_pm_csv}" ] || printf '%s\n' "${PM_DS_HEADER}" >> "${_pm_csv}"
++    [ -s "${PM_OUT}/jvm_threads.csv" ] || printf '%s\n' "${PM_THR_HEADER}" >> "${PM_OUT}/jvm_threads.csv"
 +    _pm_en=""
 +    [ "${PERF_CLI_ENABLE_DS_STATS}" = "true" ] && _pm_en="${PM_W}/cli.enable"
 +    pm_meta cli controller "${PM_CLI_CTRL}"
@@ -764,7 +783,9 @@ new file mode 100755
 +                pm_warn_once noconn "管理インタフェース (${PM_CLI_CTRL}) に ${PERF_WAIT_TIMEOUT} 秒たっても接続できません。60 秒ごとに再試行します。詳細: ${PM_W}/cli.err"
 +                _pm_retry=60
 +            fi
-+            pm_jboss_alive || PM_JPID="$(pm_find_jboss_pid)"
++            # 接続できない間も OS スレッド数は記録する (ライブスレッド数は空欄)
++            pm_now
++            pm_threads_row
 +            sleep "${_pm_retry}"
 +            continue
 +        fi
@@ -780,8 +801,8 @@ new file mode 100755
 +        else
 +            _pm_fail=$((_pm_fail + 1))
 +            [ "${_pm_fail}" = 1 ] && pm_log WARN "① jboss-cli の取得に失敗しました (seq=${_pm_seq})。続けて試します。詳細: ${PM_W}/cli.err"
-+            pm_jboss_alive || PM_JPID="$(pm_find_jboss_pid)"
 +        fi
++        pm_threads_row
 +        # プール統計が無効なデータソースは実行時に有効化する (60 秒に 1 回まで)
 +        if [ -s "${PM_W}/cli.enable" ] && [ $(( PM_EPOCH - _pm_en_last )) -ge 60 ]; then
 +            _pm_en_last="${PM_EPOCH}"
@@ -930,7 +951,7 @@ new file mode 100755
 +        echo "  収集 ${_pm_c}: ${_pm_s} (pid=${_pm_p})"
 +    done
 +    echo "  ファイル (行数 / 最終行の時刻):"
-+    for _pm_f in "${PM_OUT}/cli_datasource.csv" "${PM_OUT}/jvm_jstat_gc.csv"; do
++    for _pm_f in "${PM_OUT}/cli_datasource.csv" "${PM_OUT}/jvm_threads.csv" "${PM_OUT}/jvm_jstat_gc.csv"; do
 +        [ -f "${_pm_f}" ] || continue
 +        printf '    %-20s %8s  %s\n' "$(basename "${_pm_f}")" "$(wc -l < "${_pm_f}" | tr -d ' ')" "$(tail -n 1 "${_pm_f}" | cut -d, -f1 | tr -d '"')"
 +    done
@@ -1021,7 +1042,7 @@ diff --git a/docker/front/Dockerfile b/docker/front/Dockerfile
  
 +# --- 4. 性能試験用メトリクス収集 (ビルド引数で有効化 / 無効化) -----------------
 +#   --build-arg PERF_METRICS_ENABLED=true  : perf-metrics.sh を残し、起動時に収集を始める
-+#                                           (DB 接続プールと jstat。追加のパッケージは不要)。
++#                                           (DB 接続プール・スレッド数と jstat。追加のパッケージは不要)。
 +#   --build-arg PERF_METRICS_ENABLED=false : (既定) perf-metrics.sh を削除する。本番用。
 +#   --build-arg PERF_INTERVAL=10           : 取得間隔の既定 (秒)。タスク定義の environment
 +#                                           (PERF_INTERVAL・PERF_CLI_INTERVAL など) でも上書きできる。
@@ -1073,7 +1094,7 @@ diff --git a/docker/back/Dockerfile b/docker/back/Dockerfile
  
 +# --- 3. 性能試験用メトリクス収集 (ビルド引数で有効化 / 無効化) -----------------
 +#   --build-arg PERF_METRICS_ENABLED=true  : perf-metrics.sh を残し、起動時に収集を始める
-+#                                           (DB 接続プールと jstat。追加のパッケージは不要)。
++#                                           (DB 接続プール・スレッド数と jstat。追加のパッケージは不要)。
 +#   --build-arg PERF_METRICS_ENABLED=false : (既定) perf-metrics.sh を削除する。本番用。
 +#   --build-arg PERF_INTERVAL=10           : 取得間隔の既定 (秒)。タスク定義の environment
 +#                                           (PERF_INTERVAL・PERF_CLI_INTERVAL など) でも上書きできる。
