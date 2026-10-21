@@ -76,8 +76,8 @@ for SH in "${SHELLS[@]}"; do
   check "rc=0・JBoss を起動" '[ $RC -eq 0 ] && grep -qx STARTED <<<"$OUT"'
   check "起動ログに有効の枠" 'grep -q "性能試験用メトリクス収集: 有効" <<<"$OUT"'
   check "出力先は current ではなく実体パスの perf/" 'grep -q "出力先 : $D/perf\$" <<<"$OUT" && [ -d "$D/perf" ]'
-  check "統計の引数をコマンド直後へ (pin・元の引数はその後ろ)" '[ "$(args)" = "ARG[-Dwildfly.statistics-enabled=true]|ARG[-Djboss.server.log.dir=$D]|ARG[-b]|ARG[0.0.0.0]|ARG[-Dfoo=a b]|" ]'
-  check "preflight OK 行に統計の引数" 'grep -q "preflight OK. starting: $JH/bin/standalone.sh -Dwildfly.statistics-enabled=true -Djboss.server.log.dir=$D" <<<"$OUT"'
+  check "統計の引数をコマンド直後へ (pin・元の引数はその後ろ)" '[ "$(args)" = "ARG[-Dwildfly.datasources.statistics-enabled=true]|ARG[-Djboss.server.log.dir=$D]|ARG[-b]|ARG[0.0.0.0]|ARG[-Dfoo=a b]|" ]'
+  check "preflight OK 行に統計の引数" 'grep -q "preflight OK. starting: $JH/bin/standalone.sh -Dwildfly.datasources.statistics-enabled=true -Djboss.server.log.dir=$D" <<<"$OUT"'
   check "JBOSS_LOG_DIR は実体パスのまま" 'grep -qx "JBOSS_LOG_DIR=$D" <<<"$OUT"'
   check "perf_meta.csv に出力先・LOG_ID" 'grep -q "^perf,output_dir,\"$D/perf\"" "$D/perf/perf_meta.csv" && grep -q "^container,log_id,\"$(basename "$D")\"" "$D/perf/perf_meta.csv"'
   check "状態ファイル (status / stop 用) を作業ディレクトリに" 'grep -q "PM_OUT=.$D/perf." "$R/work/perf-metrics.state"'
@@ -90,7 +90,7 @@ for SH in "${SHELLS[@]}"; do
   run_ep PERF_METRICS_ENABLED=true SERVER_CONFIG=standalone.xml EXTRASLB_TRUSTSTORE_TYPE=JKS EXTRASLB_TRUSTSTORE_PASSWORD=secret -- eap
   D=$(own_dir)
   check "rc=0・JBoss を起動" '[ $RC -eq 0 ] && grep -qx STARTED <<<"$OUT"'
-  check "統計 → pin → 本番の引数 の順" '[ "$(args | cut -d"|" -f1-5)" = "ARG[-Dwildfly.statistics-enabled=true]|ARG[-Djboss.server.log.dir=$D]|ARG[-b]|ARG[0.0.0.0]|ARG[-bmanagement]" ]'
+  check "統計 → pin → 本番の引数 の順" '[ "$(args | cut -d"|" -f1-5)" = "ARG[-Dwildfly.datasources.statistics-enabled=true]|ARG[-Djboss.server.log.dir=$D]|ARG[-b]|ARG[0.0.0.0]|ARG[-bmanagement]" ]'
   check "perf_meta.csv の起動コマンドでパスワードを伏せる" 'grep -q "trustStorePassword=\*\*\*\*\*\*\*\*" "$D/perf/perf_meta.csv" && ! grep -q secret "$D/perf/perf_meta.csv"'
   rm -rf "$R"
 

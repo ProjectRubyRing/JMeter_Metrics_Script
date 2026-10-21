@@ -1043,7 +1043,7 @@ case "${PERF_METRICS_ENABLED:-false}" in
             . "${PERF_METRICS_SCRIPT}"
             perf_metrics_start "$@" \
                 || echo "[efs-entrypoint] WARN: 性能試験用メトリクス収集を開始できませんでした (JBoss はそのまま起動します)" >&2
-            # Undertow・トランザクション等の統計を有効にする引数 (-Dwildfly.statistics-enabled=true)
+            # データソースの統計を有効にする引数 (-Dwildfly.datasources.statistics-enabled=true)
             # を standalone.sh の直後へ足す (standalone.sh は '--' より後ろの引数を読まないため)
             if [ -n "${PERF_SERVER_OPTS:-}" ]; then
                 case "${1:-}" in

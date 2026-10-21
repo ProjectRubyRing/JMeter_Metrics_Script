@@ -4,22 +4,13 @@
     モノトーンの Excel レポート (.xlsx) に変換します (Windows 11 / PowerShell 5.1・7)。
 
 .DESCRIPTION
-    ① jboss-cli (DB 接続プール・HTTP・IO ワーカー・スレッドプール・トランザクション・JVM)、
-    ② jstat / jcmd (ヒープ・GC)、③ top / ps / cgroup (CPU・メモリ・プロセス・スレッド) の
-    CSV を読み込み、次のシートを持つブックを作成します。
+    ① jboss-cli の DB 接続プール (cli_datasource.csv) と ② jstat -gc (jvm_jstat_gc.csv) を
+    読み込み、次のシートを持つブックを作成します。
 
-      サマリー           収集情報・所見・主要指標 (最大 / 平均 / 95% 値 / 最小)・データソース別・収集プロセスの負荷
-      グラフ             HTTP・スレッド / DB 接続プール / ヒープ・GC / CPU・メモリ の推移 (共通の時間軸)
-      DB接続プール       データソース別の時系列 (使用率・区間の待ち / 取得失敗など)
-      HTTP・スレッド     スループット・エラー・処理時間・IO ワーカー・スレッドプール・セッション
-      JVM・GC（CLI）     ヒープ・非ヒープ・メモリプール・スレッド・クラス・GC (platform-mbean)
-      ヒープ・GC（jstat） 各領域の使用量・容量、区間の GC 回数・時間・GC 時間率
-      ヒープ詳細（jcmd）  GC.heap_info (リージョン・メタスペース)
-      CPU・メモリ（top）  ロードアベレージ・CPU 内訳・メモリ・JBoss と収集プロセスの %CPU / RES
-      スレッド別CPU       top -H の上位スレッドをスレッド名ごとに集計
-      プロセス（ps）      JBoss のスレッド数・RSS・CPU と収集プロセスの合計
-      プロセス一覧（ps）  ps の全行 (オートフィルター付き)
-      コンテナ（cgroup）  CPU 使用率・スロットリング・メモリ使用量・OOM
+      サマリー             所見・主要指標 (最大 / 95% 値 / 平均 / 最小)・データソース別・収集情報の抜粋
+      グラフ               DB 接続プール (データソース別) とヒープ・GC の推移 (共通の時間軸)
+      DB接続プール         データソース別の時系列 (使用率・区間の待ち / 取得失敗など)
+      ヒープ・GC（jstat）  各領域の使用量・容量、区間の GC 回数・時間・GC 時間率
       収集情報 / 凡例
 
     ・フォント Meiryo UI、黒・グレーのモノトーン。グラフは線の種類で系列を区別します。
@@ -31,7 +22,7 @@
 
 .PARAMETER InputPath
     次のいずれか
-      ・perf/ ディレクトリ (perf_meta.csv や cli_*.csv を含む)
+      ・perf/ ディレクトリ (perf_meta.csv・cli_datasource.csv・jvm_jstat_gc.csv を含む)
       ・その親ディレクトリ (mid/ など)。下にある perf/ をすべて探し、1 つずつブックを作成します
       ・perf-metrics.sh pack で作った .tar.gz / .tar、または perf/ を固めた .zip
 
@@ -108,16 +99,14 @@ param(
 )
 if (-not $Title) { $Title = '性能試験メトリクス レポート' }
 $ErrorActionPreference = 'Stop'
-$Version = '1.0.0'
+$Version = '2.0.0'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $Inv = [Globalization.CultureInfo]::InvariantCulture
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
-$NumStyle = [Globalization.NumberStyles]::Float
 $XmlNeedRe = [regex]'[&<>"\x01-\x08\x0B\x0C\x0E-\x1F]'
 $CtlRe = [regex]'[\x01-\x08\x0B\x0C\x0E-\x1F]'
-$NumRe = [regex]'^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
 
 function Write-Info([string]$Message) { Write-Host ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message) }
 
@@ -223,30 +212,7 @@ function X([string]$s) {
     $s = $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
     return $CtlRe.Replace($s, '')
 }
-function Split-Csv([string]$line) {
-    if ($line.IndexOf([char]34) -lt 0) { return , $line.Split(',') }
-    $list = New-Object System.Collections.Generic.List[string]
-    $sb = New-Object System.Text.StringBuilder
-    $inq = $false; $n = $line.Length
-    for ($i = 0; $i -lt $n; $i++) {
-        $ch = $line[$i]
-        if ($inq) {
-            if ($ch -eq [char]34) {
-                if ($i + 1 -lt $n -and $line[$i + 1] -eq [char]34) { [void]$sb.Append([char]34); $i++ } else { $inq = $false }
-            } else { [void]$sb.Append($ch) }
-        } elseif ($ch -eq [char]34) { $inq = $true }
-        elseif ($ch -eq [char]44) { $list.Add($sb.ToString()); [void]$sb.Clear() }
-        else { [void]$sb.Append($ch) }
-    }
-    $list.Add($sb.ToString())
-    return , $list.ToArray()
-}
-function NStr($v) {
-    $d = [double]$v
-    if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { return '' }
-    return $d.ToString('R', $Inv)
-}
-
+function Split-Csv([string]$line) { return , [PerfRpt]::SplitCsv($line) }
 function SerialText([double]$x) {
     $dt = [DateTime]::FromOADate($x)
     return $dt.ToString('yyyy/MM/dd HH:mm:ss', $Inv)
@@ -262,18 +228,8 @@ function WrapHt([string]$s, [double]$width) { $l = [Math]::Truncate((Units $s) /
 
 # セル
 function StrC([string]$ref, [string]$s, [int]$st) { return '<c r="' + $ref + '" s="' + $st + '" t="inlineStr"><is><t xml:space="preserve">' + (X $s) + '</t></is></c>' }
-function NumC([string]$ref, $v, [int]$st) { if ($null -eq $v) { return '<c r="' + $ref + '" s="' + $st + '"/>' }; $t = NStr $v; if ($t -eq '') { return '<c r="' + $ref + '" s="' + $st + '"/>' }; return '<c r="' + $ref + '" s="' + $st + '"><v>' + $t + '</v></c>' }
+function NumC([string]$ref, $v, [int]$st) { $t = [PerfRpt]::NStr($v); if ($t -eq '') { return '<c r="' + $ref + '" s="' + $st + '"/>' }; return '<c r="' + $ref + '" s="' + $st + '"><v>' + $t + '</v></c>' }
 function EmptyC([string]$ref, [int]$st) { return '<c r="' + $ref + '" s="' + $st + '"/>' }
-function ValC([string]$ref, $v, [string]$fmt) {
-    $st = $FMTS[$fmt]; if ($null -eq $st) { $st = $S_TEXT }
-    if ($null -eq $v) { return EmptyC $ref $st }
-    if ($v -is [string]) {
-        if ($fmt -eq 'text' -or $fmt -eq 'textc') { return StrC $ref $v $st }
-        $d = $PerfRpt::D($v); if ($null -eq $d) { return StrC $ref $v $S_TEXT }; return NumC $ref $d $st
-    }
-    if ($fmt -eq 'text' -or $fmt -eq 'textc') { return StrC $ref (NStr $v) $st }
-    return NumC $ref $v $st
-}
 function Row([int]$r, [string]$cells, [double]$ht) {
     if ($ht -gt 0) { return '<row r="' + $r + '" ht="' + $ht.ToString($Inv) + '" customHeight="1">' + $cells + '</row>' }
     return '<row r="' + $r + '">' + $cells + '</row>'
@@ -311,167 +267,11 @@ function Stat($list) {
 function NewList() { return , (New-Object 'System.Collections.Generic.List[double]') }
 
 #------------------------------------------------------------------------------
-# 高速化: 行ごとに何十回も呼ぶ処理 (CSV の分解・数値化・増分・丸め・時刻・行の XML 出力) は
-# .NET の静的メソッドにまとめる。PowerShell の関数は 1 回 100µs 以上かかり、24 時間分
-# (数十万行) では数十分になるため。C# (Add-Type) を優先し、使えない環境 (csc の実行が
-# 禁止されている等) では同じ API の PowerShell クラスへ自動で切り替える (結果は同じ)。
+# 行ごとに何度も呼ぶ処理 (CSV の分解・数値化・増分・丸め・時刻・行の XML 出力)。
+# PowerShell の関数は 1 回の呼び出しが重いため、クラスの静的メソッドにまとめる。
 #------------------------------------------------------------------------------
-$PerfRptCsSource = @'
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Text.RegularExpressions;
-
-public sealed class PerfRptTableV1 { public string Name; public string[] H; public Hashtable I; public List<string[]> Rows; }
-
-public static class PerfRptCsV1 {
-    static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-    static readonly Regex XmlNeed = new Regex("[&<>\"\\x01-\\x08\\x0B\\x0C\\x0E-\\x1F]");
-    static readonly Regex Ctl = new Regex("[\\x01-\\x08\\x0B\\x0C\\x0E-\\x1F]");
-    static readonly Dictionary<long, double> OffCache = new Dictionary<long, double>();
-    static PropertyInfo BaseProp;
-    public static bool UseRecorded = false;
-    public static double RecOffset = 0;
-    public static void ResetTz() { OffCache.Clear(); }
-
-    static object Unwrap(object o) {
-        if (o == null) return null;
-        Type t = o.GetType();
-        if (t.FullName == "System.Management.Automation.PSObject") {
-            if (BaseProp == null) BaseProp = t.GetProperty("BaseObject");
-            return BaseProp.GetValue(o, null);
-        }
-        return o;
-    }
-    static bool Num(object o, out double v) {
-        v = 0; o = Unwrap(o);
-        if (o == null) return false;
-        if (o is double) { v = (double)o; return true; }
-        if (o is int) { v = (int)o; return true; }
-        if (o is long) { v = (long)o; return true; }
-        if (o is decimal) { v = (double)(decimal)o; return true; }
-        if (o is float) { v = (float)o; return true; }
-        string s = o as string;
-        if (s == null) { try { v = Convert.ToDouble(o, Inv); return true; } catch { return false; } }
-        if (s.Length == 0 || s == "-") return false;
-        return double.TryParse(s, NumberStyles.Float, Inv, out v);
-    }
-    public static object D(object s) { double v; if (Num(s, out v)) return v; return null; }
-    public static string[] SplitCsv(string line) {
-        if (line.IndexOf('"') < 0) return line.Split(',');
-        List<string> list = new List<string>(); StringBuilder sb = new StringBuilder(); bool inq = false;
-        for (int i = 0; i < line.Length; i++) {
-            char c = line[i];
-            if (inq) {
-                if (c == '"') { if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; } else inq = false; }
-                else sb.Append(c);
-            } else if (c == '"') inq = true;
-            else if (c == ',') { list.Add(sb.ToString()); sb.Length = 0; }
-            else sb.Append(c);
-        }
-        list.Add(sb.ToString());
-        return list.ToArray();
-    }
-    public static PerfRptTableV1 ReadCsv(string path, string name, double from, double to) {
-        if (!File.Exists(path)) return null;
-        PerfRptTableV1 t = new PerfRptTableV1(); t.Name = name; t.I = new Hashtable(); t.Rows = new List<string[]>();
-        using (StreamReader r = new StreamReader(path, new UTF8Encoding(false))) {
-            string line = r.ReadLine();
-            if (line == null) return null;
-            t.H = SplitCsv(line);
-            for (int i = 0; i < t.H.Length; i++) t.I[t.H[i]] = i;
-            int ei = t.I.ContainsKey("epoch") ? (int)t.I["epoch"] : -1;
-            int nh = t.H.Length;
-            while ((line = r.ReadLine()) != null) {
-                if (line.Length == 0) continue;
-                string[] f = SplitCsv(line);
-                if (f.Length < nh) continue;
-                if (ei >= 0) {
-                    double e;
-                    if (!double.TryParse(f[ei], NumberStyles.Float, Inv, out e)) continue;
-                    if (e < from || e > to) continue;
-                }
-                t.Rows.Add(f);
-            }
-        }
-        return t;
-    }
-    public static string G(object t, object row, string key) {
-        PerfRptTableV1 tb = (PerfRptTableV1)Unwrap(t); string[] r = (string[])Unwrap(row);
-        object o = tb.I[key]; if (o == null) return null;
-        return r[(int)o];
-    }
-    public static object GD(object t, object row, string key) { return D(G(t, row, key)); }
-    public static object Dl(object cur, object prev) {
-        double c, p; if (!Num(cur, out c) || !Num(prev, out p)) return null;
-        double d = c - p; return d < 0 ? c : d;
-    }
-    public static object Div(object a, object b) { double x, y; if (!Num(a, out x) || !Num(b, out y) || y == 0) return null; return x / y; }
-    public static object Rnd(object v, int n) { double x; if (!Num(v, out x)) return null; return Math.Round(x, n); }
-    public static object MB(object b) { double x; if (!Num(b, out x)) return null; return Math.Round(x / 1048576.0, 1); }
-    public static object KBtoMB(object kb) { double x; if (!Num(kb, out x)) return null; return Math.Round(x / 1024.0, 1); }
-    public static void AddV(List<double> list, object v) { double x; if (Num(v, out x)) list.Add(x); }
-    public static double XT(double ep) {
-        if (UseRecorded) return (ep + RecOffset) / 86400.0 + 25569.0;
-        long h = (long)Math.Floor(ep / 3600);
-        double off;
-        if (!OffCache.TryGetValue(h, out off)) {
-            off = TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.FromUnixTimeSeconds((long)ep).UtcDateTime).TotalSeconds;
-            OffCache[h] = off;
-        }
-        return (ep + off) / 86400.0 + 25569.0;
-    }
-    public static string X(string s) {
-        if (string.IsNullOrEmpty(s) || !XmlNeed.IsMatch(s)) return s;
-        s = s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
-        return Ctl.Replace(s, "");
-    }
-    public static string NStr(object v) {
-        double d; if (!Num(v, out d)) return "";
-        if (double.IsNaN(d) || double.IsInfinity(d)) return "";
-        return d.ToString("R", Inv);
-    }
-    // 表の行を <row> の XML にして書き出す (fm / st は 0 始まりの列ごとの書式・スタイル番号)
-    public static void WriteRows(TextWriter w, IList rows, string[] fm, int[] st, int textStyle, int firstRow, string[] coln) {
-        StringBuilder sb = new StringBuilder(8192);
-        int nc = fm.Length;
-        for (int i = 0; i < rows.Count; i++) {
-            object[] vals = (object[])Unwrap(rows[i]);
-            string rs = (firstRow + i).ToString(Inv);
-            sb.Length = 0;
-            sb.Append("<row r=\"").Append(rs).Append("\">");
-            for (int c = 0; c < nc; c++) {
-                object v = c < vals.Length ? Unwrap(vals[c]) : null;
-                string rf = coln[c + 1] + rs;
-                if (v == null) { sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(st[c]).Append("\"/>"); continue; }
-                string f = fm[c];
-                if (f == "text" || f == "textc") {
-                    string sv = v as string; if (sv == null) sv = Convert.ToString(v, Inv);
-                    sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(st[c]).Append("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">").Append(X(sv)).Append("</t></is></c>");
-                } else if (v is string) {
-                    double d;
-                    if (!Num(v, out d)) sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(textStyle).Append("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">").Append(X((string)v)).Append("</t></is></c>");
-                    else sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(st[c]).Append("\"><v>").Append(NStr(d)).Append("</v></c>");
-                } else {
-                    string t = NStr(v);
-                    if (t.Length == 0) sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(st[c]).Append("\"/>");
-                    else sb.Append("<c r=\"").Append(rf).Append("\" s=\"").Append(st[c]).Append("\"><v>").Append(t).Append("</v></c>");
-                }
-            }
-            sb.Append("</row>");
-            w.Write(sb.ToString());
-        }
-    }
-}
-'@
-
-# 同じ API の PowerShell 版 (Add-Type が使えないとき)
-class PerfRptTablePsV1 { [string]$Name; [string[]]$H; [hashtable]$I; [System.Collections.Generic.List[string[]]]$Rows }
-class PerfRptPsV1 {
+class PerfRptTable { [string]$Name; [string[]]$H; [hashtable]$I; [System.Collections.Generic.List[string[]]]$Rows }
+class PerfRpt {
     static [Globalization.CultureInfo]$Inv = [Globalization.CultureInfo]::InvariantCulture
     static [regex]$CsvRe = [regex]'(?:^|,)(?:"((?:[^"]|"")*)"|([^,]*))'
     static [regex]$XmlNeed = [regex]'[&<>"\x01-\x08\x0B\x0C\x0E-\x1F]'
@@ -479,7 +279,7 @@ class PerfRptPsV1 {
     static [hashtable]$Off = @{}
     static [bool]$UseRecorded = $false
     static [double]$RecOffset = 0
-    static [void] ResetTz() { [PerfRptPsV1]::Off = @{} }
+    static [void] ResetTz() { [PerfRpt]::Off = @{} }
     static [object] D([object]$s) {
         if ($null -eq $s) { return $null }
         if ($s -is [double]) { return $s }
@@ -487,35 +287,36 @@ class PerfRptPsV1 {
         $t = [string]$s
         if ($t.Length -eq 0 -or $t -eq '-') { return $null }
         $v = 0.0
-        if ([double]::TryParse($t, [Globalization.NumberStyles]::Float, [PerfRptPsV1]::Inv, [ref]$v)) { return $v }
+        if ([double]::TryParse($t, [Globalization.NumberStyles]::Float, [PerfRpt]::Inv, [ref]$v)) { return $v }
         return $null
     }
     static [string[]] SplitCsv([string]$line) {
         if ($line.IndexOf([char]34) -lt 0) { return $line.Split(',') }
         $list = New-Object System.Collections.Generic.List[string]
-        foreach ($m in [PerfRptPsV1]::CsvRe.Matches($line)) {
+        foreach ($m in [PerfRpt]::CsvRe.Matches($line)) {
             if ($m.Groups[1].Success) { $list.Add($m.Groups[1].Value.Replace('""', '"')) } else { $list.Add($m.Groups[2].Value) }
         }
         return $list.ToArray()
     }
+    # CSV を読む。epoch で時間帯を絞り、途中で切れた行 (コンテナ停止時) は捨てる。
     static [object] ReadCsv([string]$path, [string]$name, [double]$from, [double]$to) {
         if (-not [IO.File]::Exists($path)) { return $null }
-        $t = [PerfRptTablePsV1]::new(); $t.Name = $name; $t.I = @{}; $t.Rows = New-Object 'System.Collections.Generic.List[string[]]'
+        $t = [PerfRptTable]::new(); $t.Name = $name; $t.I = @{}; $t.Rows = New-Object 'System.Collections.Generic.List[string[]]'
         $first = $true; $ei = -1; $nh = 0
         foreach ($line in [IO.File]::ReadLines($path, (New-Object System.Text.UTF8Encoding($false)))) {
             if ($first) {
-                $first = $false; $t.H = [PerfRptPsV1]::SplitCsv($line)
+                $first = $false; $t.H = [PerfRpt]::SplitCsv($line)
                 for ($i = 0; $i -lt $t.H.Length; $i++) { $t.I[$t.H[$i]] = $i }
                 if ($t.I.ContainsKey('epoch')) { $ei = [int]$t.I['epoch'] }
                 $nh = $t.H.Length
                 continue
             }
             if ($line.Length -eq 0) { continue }
-            $f = [PerfRptPsV1]::SplitCsv($line)
+            $f = [PerfRpt]::SplitCsv($line)
             if ($f.Length -lt $nh) { continue }
             if ($ei -ge 0) {
                 $e = 0.0
-                if (-not [double]::TryParse($f[$ei], [Globalization.NumberStyles]::Float, [PerfRptPsV1]::Inv, [ref]$e)) { continue }
+                if (-not [double]::TryParse($f[$ei], [Globalization.NumberStyles]::Float, [PerfRpt]::Inv, [ref]$e)) { continue }
                 if ($e -lt $from -or $e -gt $to) { continue }
             }
             $t.Rows.Add($f)
@@ -524,39 +325,41 @@ class PerfRptPsV1 {
         return $t
     }
     static [string] G([object]$t, [object]$row, [string]$key) { $o = $t.I[$key]; if ($null -eq $o) { return $null }; return $row[[int]$o] }
-    static [object] GD([object]$t, [object]$row, [string]$key) { return [PerfRptPsV1]::D([PerfRptPsV1]::G($t, $row, $key)) }
+    static [object] GD([object]$t, [object]$row, [string]$key) { return [PerfRpt]::D([PerfRpt]::G($t, $row, $key)) }
+    # 累計カウンタの増分 (減った = 再起動・統計のクリアのときは、その回の値をそのまま増分とする)
     static [object] Dl([object]$cur, [object]$prev) {
-        $c = [PerfRptPsV1]::D($cur); $p = [PerfRptPsV1]::D($prev)
+        $c = [PerfRpt]::D($cur); $p = [PerfRpt]::D($prev)
         if ($null -eq $c -or $null -eq $p) { return $null }
         $d = $c - $p; if ($d -lt 0) { return $c }; return $d
     }
     static [object] Div([object]$a, [object]$b) {
-        $x = [PerfRptPsV1]::D($a); $y = [PerfRptPsV1]::D($b)
+        $x = [PerfRpt]::D($a); $y = [PerfRpt]::D($b)
         if ($null -eq $x -or $null -eq $y -or $y -eq 0) { return $null }; return $x / $y
     }
-    static [object] Rnd([object]$v, [int]$n) { $x = [PerfRptPsV1]::D($v); if ($null -eq $x) { return $null }; return [Math]::Round([double]$x, $n) }
-    static [object] MB([object]$b) { $x = [PerfRptPsV1]::D($b); if ($null -eq $x) { return $null }; return [Math]::Round([double]$x / 1048576.0, 1) }
-    static [object] KBtoMB([object]$kb) { $x = [PerfRptPsV1]::D($kb); if ($null -eq $x) { return $null }; return [Math]::Round([double]$x / 1024.0, 1) }
-    static [void] AddV([System.Collections.Generic.List[double]]$list, [object]$v) { $x = [PerfRptPsV1]::D($v); if ($null -ne $x) { $list.Add([double]$x) } }
+    static [object] Rnd([object]$v, [int]$n) { $x = [PerfRpt]::D($v); if ($null -eq $x) { return $null }; return [Math]::Round([double]$x, $n) }
+    static [object] KBtoMB([object]$kb) { $x = [PerfRpt]::D($kb); if ($null -eq $x) { return $null }; return [Math]::Round([double]$x / 1024.0, 1) }
+    static [void] AddV([System.Collections.Generic.List[double]]$list, [object]$v) { $x = [PerfRpt]::D($v); if ($null -ne $x) { $list.Add([double]$x) } }
+    # UNIX 秒 → Excel のシリアル値 (この PC のタイムゾーン、または記録時の UTC オフセット)
     static [double] XT([double]$ep) {
-        if ([PerfRptPsV1]::UseRecorded) { return ($ep + [PerfRptPsV1]::RecOffset) / 86400.0 + 25569.0 }
+        if ([PerfRpt]::UseRecorded) { return ($ep + [PerfRpt]::RecOffset) / 86400.0 + 25569.0 }
         $h = [long][Math]::Floor($ep / 3600)
-        if (-not [PerfRptPsV1]::Off.ContainsKey($h)) {
-            [PerfRptPsV1]::Off[$h] = [TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds([long]$ep).UtcDateTime).TotalSeconds
+        if (-not [PerfRpt]::Off.ContainsKey($h)) {
+            [PerfRpt]::Off[$h] = [TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds([long]$ep).UtcDateTime).TotalSeconds
         }
-        return ($ep + [double][PerfRptPsV1]::Off[$h]) / 86400.0 + 25569.0
+        return ($ep + [double][PerfRpt]::Off[$h]) / 86400.0 + 25569.0
     }
     static [string] X([string]$s) {
-        if ([string]::IsNullOrEmpty($s) -or -not [PerfRptPsV1]::XmlNeed.IsMatch($s)) { return $s }
+        if ([string]::IsNullOrEmpty($s) -or -not [PerfRpt]::XmlNeed.IsMatch($s)) { return $s }
         $s = $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
-        return [PerfRptPsV1]::Ctl.Replace($s, '')
+        return [PerfRpt]::Ctl.Replace($s, '')
     }
     static [string] NStr([object]$v) {
-        $x = [PerfRptPsV1]::D($v); if ($null -eq $x) { return '' }
+        $x = [PerfRpt]::D($v); if ($null -eq $x) { return '' }
         $d = [double]$x
         if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { return '' }
-        return $d.ToString('R', [PerfRptPsV1]::Inv)
+        return $d.ToString('R', [PerfRpt]::Inv)
     }
+    # 表の行を <row> の XML にして書き出す (fm / st は 0 始まりの列ごとの書式・スタイル番号)
     static [void] WriteRows([IO.TextWriter]$w, [System.Collections.IList]$rows, [string[]]$fm, [int[]]$st, [int]$textStyle, [int]$firstRow, [string[]]$coln) {
         $sb = New-Object System.Text.StringBuilder 8192
         $nc = $fm.Length
@@ -570,13 +373,13 @@ class PerfRptPsV1 {
                 if ($null -eq $v) { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('"/>'); continue }
                 $f = $fm[$c]
                 if ($f -eq 'text' -or $f -eq 'textc') {
-                    [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('" t="inlineStr"><is><t xml:space="preserve">').Append([PerfRptPsV1]::X([string]$v)).Append('</t></is></c>')
+                    [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('" t="inlineStr"><is><t xml:space="preserve">').Append([PerfRpt]::X([string]$v)).Append('</t></is></c>')
                 } elseif ($v -is [string]) {
-                    $d = [PerfRptPsV1]::D($v)
-                    if ($null -eq $d) { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($textStyle).Append('" t="inlineStr"><is><t xml:space="preserve">').Append([PerfRptPsV1]::X($v)).Append('</t></is></c>') }
-                    else { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('"><v>').Append([PerfRptPsV1]::NStr($d)).Append('</v></c>') }
+                    $d = [PerfRpt]::D($v)
+                    if ($null -eq $d) { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($textStyle).Append('" t="inlineStr"><is><t xml:space="preserve">').Append([PerfRpt]::X($v)).Append('</t></is></c>') }
+                    else { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('"><v>').Append([PerfRpt]::NStr($d)).Append('</v></c>') }
                 } else {
-                    $t = [PerfRptPsV1]::NStr($v)
+                    $t = [PerfRpt]::NStr($v)
                     if ($t.Length -eq 0) { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('"/>') }
                     else { [void]$sb.Append('<c r="').Append($rf).Append('" s="').Append($st[$c]).Append('"><v>').Append($t).Append('</v></c>') }
                 }
@@ -586,26 +389,16 @@ class PerfRptPsV1 {
         }
     }
 }
-
-$PerfRpt = $null
-if ($env:PERFRPT_NO_ADDTYPE -ne '1') {
-    try {
-        if (-not ('PerfRptCsV1' -as [type])) { Add-Type -TypeDefinition $PerfRptCsSource -Language CSharp -ErrorAction Stop }
-        $PerfRpt = [PerfRptCsV1]
-    } catch {
-        Write-Warning ('C# のコンパイル (Add-Type) が使えないため、PowerShell だけで処理します (大きなデータでは時間がかかります): ' + $_.Exception.Message)
-    }
-}
-if ($null -eq $PerfRpt) { $PerfRpt = [PerfRptPsV1] }
+$PerfRpt = [PerfRpt]
 
 #------------------------------------------------------------------------------
 # 入力 (ディレクトリ / 親ディレクトリ / .zip / .tar.gz)
 #------------------------------------------------------------------------------
 $TempDirs = New-Object System.Collections.Generic.List[string]
+$DataFiles = @('perf_meta.csv', 'cli_datasource.csv', 'jvm_jstat_gc.csv')
 function Test-PerfDir([string]$d) {
-    if (Test-Path -LiteralPath (Join-Path $d 'perf_meta.csv')) { return $true }
-    return (@(Get-ChildItem -LiteralPath $d -Filter 'cli_*.csv' -File -ErrorAction SilentlyContinue).Count -gt 0) -or
-           (@(Get-ChildItem -LiteralPath $d -Filter 'os_*.csv' -File -ErrorAction SilentlyContinue).Count -gt 0)
+    foreach ($f in $DataFiles) { if (Test-Path -LiteralPath (Join-Path $d $f)) { return $true } }
+    return $false
 }
 function Resolve-PerfDirs([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { throw "入力が見つかりません: $path" }
@@ -619,8 +412,8 @@ function Resolve-PerfDirs([string]$path) {
         if ($nm.EndsWith('.zip')) {
             [IO.Compression.ZipFile]::ExtractToDirectory($item.FullName, $tmp)
         } elseif ($nm.EndsWith('.tar.gz') -or $nm.EndsWith('.tgz') -or $nm.EndsWith('.tar')) {
-            $tarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
-            if (-not (Test-Path -LiteralPath $tarExe)) { $tarExe = 'tar.exe' }
+            $tarExe = 'tar'
+            if ($env:SystemRoot -and (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\tar.exe'))) { $tarExe = Join-Path $env:SystemRoot 'System32\tar.exe' }
             & $tarExe -xf $item.FullName -C $tmp
             if ($LASTEXITCODE -ne 0) { throw "展開に失敗しました: $($item.FullName)" }
         } elseif ($nm.EndsWith('.csv')) {
@@ -632,16 +425,15 @@ function Resolve-PerfDirs([string]$path) {
     }
     if (Test-PerfDir $root) { return , @($root) }
     $found = New-Object System.Collections.Generic.List[string]
-    foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'perf_meta.csv' -ErrorAction SilentlyContinue)) { $found.Add($f.DirectoryName) }
-    if ($found.Count -eq 0) {
-        foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'cli_jvm.csv' -ErrorAction SilentlyContinue)) { $found.Add($f.DirectoryName) }
-        foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'os_ps.csv' -ErrorAction SilentlyContinue)) { if (-not $found.Contains($f.DirectoryName)) { $found.Add($f.DirectoryName) } }
+    foreach ($fn in $DataFiles) {
+        foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -File -Filter $fn -ErrorAction SilentlyContinue)) {
+            if (-not $found.Contains($f.DirectoryName)) { $found.Add($f.DirectoryName) }
+        }
     }
-    if ($found.Count -eq 0) { throw "perf-metrics の出力 (perf_meta.csv / cli_*.csv / os_*.csv) が見つかりません: $path" }
+    if ($found.Count -eq 0) { throw "perf-metrics の出力 (perf_meta.csv / cli_datasource.csv / jvm_jstat_gc.csv) が見つかりません: $path" }
     return , ($found.ToArray() | Sort-Object)
 }
 
-# CSV を読む。epoch で時間帯を絞り、途中で切れた行 (コンテナ停止時) は捨てる。
 function Read-PerfCsv([string]$dir, [string]$name) {
     return $PerfRpt::ReadCsv((Join-Path $dir $name), $name, $script:FromEpoch, $script:ToEpoch)
 }
@@ -669,7 +461,7 @@ function New-Sheet([string]$name, [string]$title, [string]$note, [int]$freezeCol
         Rows = (New-Object System.Collections.Generic.List[object])
         Groups = (New-Object System.Collections.Generic.List[object])
         CF = (New-Object System.Collections.Generic.List[object])
-        Truncated = $false; Index = 0
+        Truncated = $false
     }
 }
 # 列を足して列番号 (1 始まり) を返す。 cat=分類 label=見出し key=元の CSV 列名 fmt=書式 w=列幅
@@ -694,8 +486,7 @@ function Write-TableSheet([System.IO.Compression.ZipArchive]$zip, $sh, [int]$she
     $e = $zip.CreateEntry("xl/worksheets/sheet$sheetIdx.xml", [IO.Compression.CompressionLevel]::Optimal)
     $w = New-Object IO.StreamWriter($e.Open(), $Utf8)
     $nc = $sh.Cols.Count; $nr = $sh.Rows.Count
-    $fit = $true
-    $w.Write((Ws-Begin 'FF404040' $fit $(if ($nr -gt 0) { $sh.FreezeCols } else { 0 }) $(if ($nr -gt 0) { 6 } else { 0 }) $false 90))
+    $w.Write((Ws-Begin 'FF404040' $true $(if ($nr -gt 0) { $sh.FreezeCols } else { 0 }) $(if ($nr -gt 0) { 6 } else { 0 }) $false 90))
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('<cols>')
     for ($c = 1; $c -le $nc; $c++) { [void]$sb.Append('<col min="' + $c + '" max="' + $c + '" width="' + ([double]$sh.Cols[$c - 1].W).ToString($Inv) + '" customWidth="1"/>') }
@@ -754,7 +545,7 @@ function Write-TableSheet([System.IO.Compression.ZipArchive]$zip, $sh, [int]$she
         }
     }
     Add-DefName $sheetIdx '_xlnm.Print_Titles' ("'" + $sh.Name + "'!`$4:`$6")
-    $w.Write((Ws-End 'landscape' $fit $false $sh.Title $extra))
+    $w.Write((Ws-End 'landscape' $true $false $sh.Title $extra))
     $w.Dispose()
 }
 
@@ -810,8 +601,7 @@ function Chart-Xml($ch, [int]$n) {
     $plot += '<c:numFmt formatCode="' + (X $script:XFMT) + '" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>' + $AXLN + (Tx-Pr 800 '-2700000')
     $plot += '<c:crossAx val="' + $ax2 + '"/><c:crosses val="min"/><c:crossBetween val="midCat"/>' + $(if ($script:XMAJ -ne '') { '<c:majorUnit val="' + $script:XMAJ + '"/>' } else { '' }) + '</c:valAx>'
     # Y
-    $ysc = '<c:min val="0"/>'; if ($ch.YMax -ne '') { $ysc += '<c:max val="' + $ch.YMax + '"/>' }
-    $plot += '<c:valAx><c:axId val="' + $ax2 + '"/><c:scaling><c:orientation val="minMax"/>' + $ysc + '</c:scaling><c:delete val="0"/><c:axPos val="l"/>' + $GRID
+    $plot += '<c:valAx><c:axId val="' + $ax2 + '"/><c:scaling><c:orientation val="minMax"/><c:min val="0"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>' + $GRID
     if ($ch.YTitle -ne '') { $plot += Ax-Title $ch.YTitle }
     $plot += '<c:numFmt formatCode="' + (X $ch.YFmt) + '" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>' + $AXLN + (Tx-Pr 800 '')
     $plot += '<c:crossAx val="' + $ax1 + '"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>'
@@ -820,17 +610,15 @@ function Chart-Xml($ch, [int]$n) {
 # 系列: 名前・シート・列 (X は日時列)。グループ (データソース別など) の行範囲を使う
 function Sr([string]$name, $sh, [int]$ycol, $grp) {
     if ($null -eq $sh -or $sh.Rows.Count -eq 0) { return $null }
-    $g = $grp
-    if ($null -eq $g) { $r1 = $DATA_ROW; $r2 = $DATA_ROW + $sh.Rows.Count - 1 } else { $r1 = $g.R1; $r2 = $g.R2 }
+    if ($null -eq $grp) { $r1 = $DATA_ROW; $r2 = $DATA_ROW + $sh.Rows.Count - 1 } else { $r1 = $grp.R1; $r2 = $grp.R2 }
     return [pscustomobject]@{ N = $name; S = $sh.Name; X = 1; Y = $ycol; R1 = $r1; R2 = $r2 }
 }
 $ChartSecs = New-Object System.Collections.Generic.List[object]
 function Add-ChartSection([string]$title) { $ChartSecs.Add([pscustomobject]@{ Title = $title; Charts = (New-Object System.Collections.Generic.List[object]) }) }
-function Add-Chart([string]$title, [string]$ytitle, [string]$yfmt, [object[]]$series, [string]$ymax) {
+function Add-Chart([string]$title, [string]$ytitle, [string]$yfmt, [object[]]$series) {
     $ss = @(); foreach ($s in $series) { if ($null -ne $s) { $ss += $s } }
     if ($ss.Count -eq 0) { return }
-    if ($ChartSecs.Count -eq 0) { Add-ChartSection '' }
-    $ChartSecs[$ChartSecs.Count - 1].Charts.Add([pscustomobject]@{ Title = $title; YTitle = $ytitle; YFmt = $yfmt; Series = $ss; YMax = $ymax })
+    $ChartSecs[$ChartSecs.Count - 1].Charts.Add([pscustomobject]@{ Title = $title; YTitle = $ytitle; YFmt = $yfmt; Series = $ss })
 }
 
 function Write-ChartsSheet([System.IO.Compression.ZipArchive]$zip, [int]$sheetIdx, [string]$sheetName, [string]$title, [string]$note) {
@@ -871,12 +659,8 @@ function Write-ChartsSheet([System.IO.Compression.ZipArchive]$zip, [int]$sheetId
     if ($extra -ne '') { $end = $end.Replace('</headerFooter>', '</headerFooter>' + $extra) }
     [void]$sb.Append($end)
     if ($n -gt 0) {
-        $e = $zip.CreateEntry('xl/drawings/drawing1.xml', [IO.Compression.CompressionLevel]::Optimal)
-        $dw = New-Object IO.StreamWriter($e.Open(), $Utf8)
-        $dw.Write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + "`n" + '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' + $anch.ToString() + '</xdr:wsDr>'); $dw.Dispose()
-        $e = $zip.CreateEntry('xl/drawings/_rels/drawing1.xml.rels', [IO.Compression.CompressionLevel]::Optimal)
-        $dw = New-Object IO.StreamWriter($e.Open(), $Utf8)
-        $dw.Write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + "`n" + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + $rels.ToString() + '</Relationships>'); $dw.Dispose()
+        Add-TextEntry $zip 'xl/drawings/drawing1.xml' ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + "`n" + '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' + $anch.ToString() + '</xdr:wsDr>')
+        Add-TextEntry $zip 'xl/drawings/_rels/drawing1.xml.rels' ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + "`n" + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + $rels.ToString() + '</Relationships>')
     }
     Add-DefName $sheetIdx '_xlnm.Print_Area' ("'" + $sheetName + "'!`$A`$1:`$R`$" + [Math]::Max($r, 4))
     $script:NCH = $n
@@ -887,27 +671,15 @@ function Write-ChartsSheet([System.IO.Compression.ZipArchive]$zip, [int]$sheetId
 # 項目名 (収集情報シート)
 #------------------------------------------------------------------------------
 $MetaLabel = @{
-    'perf.version' = 'perf-metrics.sh の版'; 'perf.start_time' = '収集開始 (コンテナの時刻)'; 'perf.utc_offset' = 'コンテナの UTC オフセット'
-    'perf.output_dir' = '出力先'; 'perf.work_dir' = '作業ディレクトリ'; 'perf.collectors' = '動かした収集'
-    'perf.cli_interval' = '① jboss-cli 間隔 (秒)'; 'perf.jstat_interval' = '② jstat 間隔 (秒)'; 'perf.jcmd_interval' = '② jcmd 間隔 (秒)'
-    'perf.top_interval' = '③ top 間隔 (秒)'; 'perf.ps_interval' = '③ ps / cgroup 間隔 (秒)'; 'perf.duration' = '収集時間 (秒。0 = 停止まで)'
-    'perf.jstat_options' = 'jstat のオプション'; 'perf.jcmd_commands' = 'jcmd のコマンド'; 'perf.statistics_opts' = '統計の有効化 (起動引数)'
+    'perf.version' = 'perf-metrics.sh の版'; 'perf.start_time' = '収集開始 (コンテナの時刻)'; 'perf.start_epoch' = '収集開始 (UNIX 秒)'
+    'perf.utc_offset' = 'コンテナの UTC オフセット'; 'perf.output_dir' = '出力先'; 'perf.collectors' = '動かした収集'
+    'perf.cli_interval' = '① jboss-cli 間隔 (秒)'; 'perf.jstat_interval' = '② jstat 間隔 (秒)'; 'perf.statistics_opts' = '統計の有効化 (起動引数)'
     'container.hostname' = 'ホスト名'; 'container.service_name' = 'サービス名'; 'container.component_name' = 'コンポーネント名'
-    'container.component_role' = '役割'; 'container.log_id' = 'LOG_ID (タスク専用ディレクトリ)'; 'container.jboss_home' = 'JBOSS_HOME'
-    'container.cpus_online' = 'CPU 数 (OS から見える数)'; 'container.mem_total_kb' = 'メモリ (OS から見える量, KB)'; 'container.os' = 'OS'
-    'container.command' = '起動コマンド'; 'ecs.TaskARN' = 'ECS タスク ARN'; 'ecs.Cluster' = 'ECS クラスター'; 'ecs.Family' = 'タスク定義'
-    'ecs.Revision' = 'リビジョン'; 'ecs.AvailabilityZone' = 'AZ'; 'ecs.LaunchType' = '起動タイプ'; 'ecs.TaskLimits' = 'タスクの上限 (CPU / Memory)'
-    'jboss.product-name' = '製品'; 'jboss.product-version' = '製品の版'; 'jboss.release-version' = 'コアの版'; 'jboss.server-name' = 'サーバー名'
-    'jboss.launch-type' = '起動形態'; 'jboss.running-mode' = '実行モード'; 'jboss.config-file' = '設定ファイル'; 'jboss.node-name' = 'ノード名'
-    'jboss.vm-name' = 'JVM'; 'jboss.vm-vendor' = 'JVM ベンダー'; 'jboss.vm-version' = 'JVM の版'; 'jboss.jvm-start-time' = 'JVM 起動時刻 (epoch ms)'
-    'jboss.available-processors' = 'JVM が使える CPU 数'; 'jvm.version' = 'JVM (jcmd VM.version)'; 'jvm.jstat_command' = 'jstat の起動方法'
-    'jvm.jcmd_command' = 'jcmd の起動方法'; 'jvm_flag.MaxHeapSize' = '最大ヒープ (バイト)'; 'jvm_flag.InitialHeapSize' = '初期ヒープ (バイト)'
-    'jvm_flag.UseG1GC' = 'G1 GC'; 'jvm_flag.UseParallelGC' = 'Parallel GC'; 'jvm_flag.UseSerialGC' = 'Serial GC'; 'jvm_flag.UseZGC' = 'Z GC'
-    'jvm_flag.MaxGCPauseMillis' = 'MaxGCPauseMillis'; 'jvm_flag.ActiveProcessorCount' = 'ActiveProcessorCount'; 'jvm_flag.MaxRAMPercentage' = 'MaxRAMPercentage'
-    'cli.controller' = 'jboss-cli の接続先'; 'cli.mode' = 'jboss-cli の方式'; 'cli.ds_stats_enabled_at_runtime' = 'プール統計を実行時に有効化した時刻'
-    'os.top_version' = 'top の版'
+    'container.log_id' = 'LOG_ID (タスク専用ディレクトリ)'; 'container.command' = '起動コマンド'
+    'cli.controller' = 'jboss-cli の接続先'; 'cli.ds_stats_enabled_at_runtime' = 'プール統計を実行時に有効化した時刻'
+    'jvm.jstat_command' = 'jstat の起動方法'
 }
-$MetaCat = @{ perf = '収集条件'; container = 'コンテナ'; ecs = 'ECS'; jboss = 'JBoss EAP'; jvm = 'JVM'; jvm_flag = 'JVM フラグ'; cli = 'jboss-cli'; os = 'OS' }
+$MetaCat = @{ perf = '収集条件'; container = 'コンテナ'; cli = 'jboss-cli'; jvm = 'jstat' }
 
 #------------------------------------------------------------------------------
 # 1 つの perf/ ディレクトリからブックを作る
@@ -944,25 +716,19 @@ function Build-Report([string]$dir, [string]$outPath) {
 
     # ---- CSV ----
     $TB = @{}
-    foreach ($n in @('cli_datasource', 'cli_undertow', 'cli_session', 'cli_io_worker', 'cli_threadpool', 'cli_transactions', 'cli_jvm', 'cli_gc', 'cli_mempool',
-                     'jvm_jstat_gc', 'jvm_jcmd_heap', 'os_top_summary', 'os_top_process', 'os_top_threads', 'os_ps', 'os_cgroup')) {
+    foreach ($n in @('cli_datasource', 'jvm_jstat_gc')) {
         $t = Read-PerfCsv $dir ($n + '.csv')
         if ($null -ne $t -and $t.Rows.Count -gt 0) { $TB[$n] = $t; Write-Info ("読み込み: {0}.csv ({1:N0} 行)" -f $n, $t.Rows.Count) }
-    }
-    $extraJstat = @()
-    foreach ($f in (Get-ChildItem -LiteralPath $dir -Filter 'jvm_jstat_*.csv' -File -ErrorAction SilentlyContinue)) {
-        if ($f.Name -eq 'jvm_jstat_gc.csv') { continue }
-        $t = Read-PerfCsv $dir $f.Name; if ($null -ne $t -and $t.Rows.Count -gt 0) { $extraJstat += $t }
     }
     if ($TB.Count -eq 0) { Write-Warning "この期間のデータがありません: $dir"; return }
 
     # 全体の時間範囲 (グラフの時間軸)
     $script:TMin = $null; $script:TMax = $null
     foreach ($t in $TB.Values) {
-        $ei = $t.I['epoch']; if ($null -eq $ei) { continue }
-        $a = $PerfRpt::D($t.Rows[0][$ei]); $b = $PerfRpt::D($t.Rows[$t.Rows.Count - 1][$ei])
-        if ($null -ne $a -and ($null -eq $script:TMin -or ($PerfRpt::XT($a)) -lt $script:TMin)) { $script:TMin = $PerfRpt::XT($a)}
-        if ($null -ne $b -and ($null -eq $script:TMax -or ($PerfRpt::XT($b)) -gt $script:TMax)) { $script:TMax = $PerfRpt::XT($b)}
+        $ei = $t.I['epoch']
+        $a = $PerfRpt::XT([double]$t.Rows[0][$ei]); $b = $PerfRpt::XT([double]$t.Rows[$t.Rows.Count - 1][$ei])
+        if ($null -eq $script:TMin -or $a -lt $script:TMin) { $script:TMin = $a }
+        if ($null -eq $script:TMax -or $b -gt $script:TMax) { $script:TMax = $b }
     }
 
     $KPI = @{}          # 主要指標用の値の列
@@ -970,12 +736,12 @@ function Build-Report([string]$dir, [string]$outPath) {
     $Sheets = New-Object System.Collections.Generic.List[object]
 
     # ==== DB 接続プール ====
-    Write-Info '集計: DB 接続プール'
     $dsSum = New-Object System.Collections.Generic.List[object]
     $shDS = $null
     if ($TB.ContainsKey('cli_datasource')) {
+        Write-Info '集計: DB 接続プール'
         $t = $TB['cli_datasource']
-        $sh = New-Sheet 'DB接続プール' 'DB 接続プール（データソース別の時系列）' ('① jboss-cli の /subsystem=datasources/data-source=*/statistics=pool・jdbc。「区間」は前回の取得からの増分です。最大プールが未設定のデータソースは IronJacamar の既定値 20 で使用率を計算しています。使用率 80% 以上・待ち・取得失敗は濃淡で表示します。') 2
+        $sh = New-Sheet 'DB接続プール' 'DB 接続プール（データソース別の時系列）' ('① jboss-cli の /subsystem=datasources/data-source=*/statistics=pool (XA データソースも同じ)。「区間」は前回の取得からの増分です。最大プールが未設定のデータソースは IronJacamar の既定値 20 で使用率を計算しています。使用率 80% 以上・待ち・取得失敗は濃淡で表示します。') 2
         $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
         $cN = Add-Col $sh '基本' 'データソース' 'ds_name' 'text' 18
         $cIn = Add-Col $sh '接続数' '使用中' 'InUseCount' 'int' 8
@@ -999,8 +765,6 @@ function Build-Report([string]$dir, [string]$outPath) {
         $cCr = Add-Col $sh '物理接続' '作成（区間）' 'Δ CreatedCount' 'int' 9
         $cDe = Add-Col $sh '物理接続' '破棄（区間）' 'Δ DestroyedCount' 'int' 9
         $cTo = Add-Col $sh '物理接続' 'アイドル破棄（区間）' 'Δ TimedOut' 'int' 10
-        $cPh = Add-Col $sh '文キャッシュ' 'ヒット率（区間）' 'Δ PSCacheHit÷Access' 'pct' 10
-        $cPs = Add-Col $sh '文キャッシュ' 'サイズ' 'PreparedStatementCacheCurrentSize' 'int' 8
         $cMn = Add-Col $sh '設定' '最小プール' 'min_pool_size' 'int' 8
         $cBt = Add-Col $sh '設定' '取得タイムアウト(ms)' 'blocking_timeout_ms' 'int' 11
         $cJn = Add-Col $sh '設定' 'JNDI 名' 'jndi_name' 'text' 30
@@ -1011,258 +775,46 @@ function Build-Report([string]$dir, [string]$outPath) {
             $rows = $grp[$key]
             $name = $PerfRpt::G($t, $rows[0], 'ds_name')
             $p = $null
-            $lIn = NewList; $lUs = NewList; $wsum = 0.0; $fsum = 0.0; $maxWaitT = $null; $atMax = 0; $mxp = $null; $lastAg = $null; $maxGet = $null
+            $lIn = NewList; $lUs = NewList; $wsum = 0.0; $fsum = 0.0; $maxWaitT = $null; $atMax = 0; $mxp = $null; $lastAg = $null
             foreach ($r in $rows) {
                 $mx = $PerfRpt::GD($t, $r, 'max_pool_size'); if ($null -eq $mx) { $mx = 20.0 }
                 $in = $PerfRpt::GD($t, $r, 'InUseCount')
-                $wd = $null; $fd = $null; $cr = $null; $de = $null; $tmo = $null; $ph = $null
+                $wd = $null; $fd = $null; $cr = $null; $de = $null; $tmo = $null
                 if ($null -ne $p) {
                     $wd = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'WaitCount')), ($PerfRpt::GD($t, $p, 'WaitCount')))
                     $fd = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'BlockingFailureCount')), ($PerfRpt::GD($t, $p, 'BlockingFailureCount')))
                     $cr = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'CreatedCount')), ($PerfRpt::GD($t, $p, 'CreatedCount')))
                     $de = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'DestroyedCount')), ($PerfRpt::GD($t, $p, 'DestroyedCount')))
                     $tmo = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'TimedOut')), ($PerfRpt::GD($t, $p, 'TimedOut')))
-                    $ph = $PerfRpt::Div(($PerfRpt::Dl(($PerfRpt::GD($t, $r, 'PreparedStatementCacheHitCount')), ($PerfRpt::GD($t, $p, 'PreparedStatementCacheHitCount')))), ($PerfRpt::Dl(($PerfRpt::GD($t, $r, 'PreparedStatementCacheAccessCount')), ($PerfRpt::GD($t, $p, 'PreparedStatementCacheAccessCount')))))
                 }
                 $us = $PerfRpt::Div($in, $mx)
                 $PerfRpt::AddV($lIn, $in); $PerfRpt::AddV($lUs, $us)
                 if ($null -ne $wd) { $wsum += $wd }; if ($null -ne $fd) { $fsum += $fd }
                 if ($null -ne $in -and $in -ge $mx) { $atMax++ }
                 $v = $PerfRpt::GD($t, $r, 'MaxWaitTime'); if ($null -ne $v -and ($null -eq $maxWaitT -or $v -gt $maxWaitT)) { $maxWaitT = $v }
-                $v = $PerfRpt::GD($t, $r, 'MaxGetTime'); if ($null -ne $v -and ($null -eq $maxGet -or $v -gt $maxGet)) { $maxGet = $v }
                 $lastAg = $PerfRpt::GD($t, $r, 'AverageGetTime'); $mxp = $mx
                 $vals = New-Object 'object[]' $sh.Cols.Count
                 $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::GD($t, $r, 'epoch'))); $vals[$cN - 1] = $name
                 $vals[$cIn - 1] = $in; $vals[$cAc - 1] = $PerfRpt::GD($t, $r, 'ActiveCount'); $vals[$cId - 1] = $PerfRpt::GD($t, $r, 'IdleCount'); $vals[$cAv - 1] = $PerfRpt::GD($t, $r, 'AvailableCount')
                 $vals[$cMx - 1] = $mx; $vals[$cUs - 1] = $PerfRpt::Rnd($us, 4); $vals[$cWd - 1] = $wd; $vals[$cFd - 1] = $fd
                 $vals[$cWc - 1] = $PerfRpt::GD($t, $r, 'WaitCount'); $vals[$cMw - 1] = $PerfRpt::GD($t, $r, 'MaxWaitCount'); $vals[$cMu - 1] = $PerfRpt::GD($t, $r, 'MaxUsedCount')
-                $vals[$cAg - 1] = $PerfRpt::GD($t, $r, 'AverageGetTime'); $vals[$cMg - 1] = $PerfRpt::GD($t, $r, 'MaxGetTime'); $vals[$cAb - 1] = $PerfRpt::GD($t, $r, 'AverageBlockingTime')
+                $vals[$cAg - 1] = $lastAg; $vals[$cMg - 1] = $PerfRpt::GD($t, $r, 'MaxGetTime'); $vals[$cAb - 1] = $PerfRpt::GD($t, $r, 'AverageBlockingTime')
                 $vals[$cMwt - 1] = $PerfRpt::GD($t, $r, 'MaxWaitTime'); $vals[$cAu - 1] = $PerfRpt::GD($t, $r, 'AverageUsageTime'); $vals[$cMuT - 1] = $PerfRpt::GD($t, $r, 'MaxUsageTime')
                 $vals[$cMc - 1] = $PerfRpt::GD($t, $r, 'MaxCreationTime'); $vals[$cCr - 1] = $cr; $vals[$cDe - 1] = $de; $vals[$cTo - 1] = $tmo
-                $vals[$cPh - 1] = $PerfRpt::Rnd($ph, 4); $vals[$cPs - 1] = $PerfRpt::GD($t, $r, 'PreparedStatementCacheCurrentSize')
                 $vals[$cMn - 1] = $PerfRpt::GD($t, $r, 'min_pool_size'); $vals[$cBt - 1] = $PerfRpt::GD($t, $r, 'blocking_timeout_ms'); $vals[$cJn - 1] = $PerfRpt::G($t, $r, 'jndi_name'); $vals[$cSe - 1] = $PerfRpt::G($t, $r, 'statistics_enabled')
                 Add-Row $sh $vals $key
                 $p = $r
             }
-            $dsSum.Add([pscustomobject]@{ Name = $name; Max = $mxp; In = (Stat $lIn); Us = (Stat $lUs); Wait = $wsum; Fail = $fsum; MaxWait = $maxWaitT; AtMax = $atMax; N = $rows.Count; AvgGet = $lastAg; MaxGet = $maxGet; StatsOff = (($PerfRpt::G($t, $rows[$rows.Count - 1], 'statistics_enabled')) -eq 'false') })
+            $dsSum.Add([pscustomobject]@{ Name = $name; Max = $mxp; In = (Stat $lIn); Us = (Stat $lUs); Wait = $wsum; Fail = $fsum; MaxWait = $maxWaitT; AtMax = $atMax; N = $rows.Count; AvgGet = $lastAg; StatsOff = (($PerfRpt::G($t, $rows[$rows.Count - 1], 'statistics_enabled')) -eq 'false') })
         }
         Fix-Ranges $sh; $Sheets.Add($sh); $shDS = $sh
-        $script:DSC = @{ In = $cIn; Ac = $cAc; Mx = $cMx; Wd = $cWd; Fd = $cFd; Mwt = $cMwt; Ag = $cAg }
-    }
-
-    # ==== HTTP・スレッド (jboss-cli の取得 1 回 = 1 行) ====
-    Write-Info '集計: HTTP・スレッド'
-    $shHT = $null
-    if ($TB.ContainsKey('cli_jvm')) {
-        $tj = $TB['cli_jvm']
-        $byEp = @{}
-        foreach ($nm in @('cli_undertow', 'cli_io_worker', 'cli_threadpool', 'cli_session', 'cli_transactions')) {
-            $byEp[$nm] = @{}
-            if (-not $TB.ContainsKey($nm)) { continue }
-            $t = $TB[$nm]; $ei = $t.I['epoch']
-            foreach ($r in $t.Rows) { $k = $r[$ei]; if (-not $byEp[$nm].ContainsKey($k)) { $byEp[$nm][$k] = New-Object System.Collections.Generic.List[object] }; $byEp[$nm][$k].Add($r) }
-        }
-        $sh = New-Sheet 'HTTP・スレッド' 'HTTP・リクエスト処理スレッド・セッション・トランザクション' ('① jboss-cli の取得 1 回を 1 行にまとめています。HTTP は全リスナーの合計、「/秒」「区間」は前回の取得からの増分です。平均処理時間は Undertow の processing-time から計算するため、リスナーの record-request-start-time=true のときだけ値が入ります。IO ワーカーが最大に達した行・キュー待ちは濃淡で表示します。') 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cRps = Add-Col $sh 'HTTP（全リスナー）' 'リクエスト/秒' 'Δ request-count÷秒' 'dec1' 10
-        $cEps = Add-Col $sh 'HTTP（全リスナー）' 'エラー/秒' 'Δ error-count÷秒' 'dec2' 9
-        $cAms = Add-Col $sh 'HTTP（全リスナー）' '平均処理時間(ms)' 'Δ processing-time÷Δ request' 'dec1' 11
-        $cMms = Add-Col $sh 'HTTP（全リスナー）' '最大処理時間(ms)' 'max-processing-time' 'dec1' 11
-        $cRx = Add-Col $sh 'HTTP（全リスナー）' '受信 KB/秒' 'Δ bytes-received' 'dec1' 9
-        $cTx = Add-Col $sh 'HTTP（全リスナー）' '送信 KB/秒' 'Δ bytes-sent' 'dec1' 9
-        $cRq = Add-Col $sh 'HTTP（全リスナー）' 'リクエスト（区間）' 'Δ request-count' 'int' 10
-        $cEr = Add-Col $sh 'HTTP（全リスナー）' 'エラー（区間）' 'Δ error-count' 'int' 9
-        $cIb = Add-Col $sh 'リクエスト処理スレッド（IO ワーカー）' '処理中' 'busy-task-thread-count' 'int' 8
-        $cIm = Add-Col $sh 'リクエスト処理スレッド（IO ワーカー）' '最大' 'max-pool-size' 'int' 7
-        $cIu = Add-Col $sh 'リクエスト処理スレッド（IO ワーカー）' '使用率' '(処理中÷最大)' 'pct' 8
-        $cIq = Add-Col $sh 'リクエスト処理スレッド（IO ワーカー）' 'キュー' 'queue-size' 'int' 7
-        $cIo = Add-Col $sh 'リクエスト処理スレッド（IO ワーカー）' 'IO スレッド' 'io-thread-count' 'int' 8
-        $cEa = Add-Col $sh 'アプリのスレッドプール' 'EJB 使用中' 'ejb3 active' 'int' 8
-        $cEq = Add-Col $sh 'アプリのスレッドプール' 'EJB キュー' 'ejb3 queue' 'int' 8
-        $cXa = Add-Col $sh 'アプリのスレッドプール' 'EE 使用中' 'ee-executor active' 'int' 8
-        $cXq = Add-Col $sh 'アプリのスレッドプール' 'EE キュー' 'ee-executor queue' 'int' 8
-        $cXh = Add-Col $sh 'アプリのスレッドプール' 'EE ハング' 'hung-thread-count' 'int' 8
-        $cSa = Add-Col $sh 'HTTP セッション' 'アクティブ' 'active-sessions' 'int' 9
-        $cSc = Add-Col $sh 'HTTP セッション' '作成（区間）' 'Δ sessions-created' 'int' 9
-        $cSr = Add-Col $sh 'HTTP セッション' '拒否（区間）' 'Δ rejected-sessions' 'int' 9
-        $cTc = Add-Col $sh 'トランザクション' 'コミット（区間）' 'Δ committed' 'int' 9
-        $cTa = Add-Col $sh 'トランザクション' 'ロールバック（区間）' 'Δ aborted' 'int' 10
-        $cTt = Add-Col $sh 'トランザクション' 'タイムアウト（区間）' 'Δ timed-out' 'int' 10
-        $cTi = Add-Col $sh 'トランザクション' '実行中' 'inflight' 'int' 7
-        $cAr = Add-Col $sh 'サーバー' 'アクティブ要求' 'active_requests' 'int' 9
-        $cJt = Add-Col $sh 'サーバー' 'JVM スレッド数' 'thread_count' 'int' 9
-        $cSs = Add-Col $sh 'サーバー' '状態' 'server_state' 'textc' 10
-        $cCm = Add-Col $sh 'サーバー' 'CLI 応答(ms)' 'cli_ms' 'int' 9
-        Add-CF $sh $cIu 'bar' '1' 0; Add-CF $sh $cIu 'ge' '1' 1; Add-CF $sh $cIq 'gt' '0' 2; Add-CF $sh $cEr 'gt' '0' 1; Add-CF $sh $cTt 'gt' '0' 1
-        $prevL = @{}; $prevS = @{}; $prevTx = $null; $pe = $null
-        $lRps = NewList; $lAms = NewList; $lIb = NewList; $lIq = NewList; $lCm = NewList; $lJt = NewList; $lSa = NewList; $reqTot = 0.0; $errTot = 0.0
-        $ioMax = $null; $ioFullN = 0; $lsn = @{}
-        foreach ($r in $tj.Rows) {
-            $epS = $PerfRpt::G($tj, $r, 'epoch'); $ep = $PerfRpt::D($epS)
-            $dt = $null; if ($null -ne $pe) { $dt = $ep - $pe }
-            # HTTP: リスナーごとの増分を合計
-            $dq = $null; $de = $null; $dp = $null; $drx = $null; $dtx = $null; $mms = $null
-            $tu = $TB['cli_undertow']
-            if ($byEp['cli_undertow'].ContainsKey($epS)) {
-                $dq = 0.0; $de = 0.0; $dp = 0.0; $drx = 0.0; $dtx = 0.0; $any = $false
-                foreach ($u in $byEp['cli_undertow'][$epS]) {
-                    $lk = ($PerfRpt::G($tu, $u, 'server')) + '/' + ($PerfRpt::G($tu, $u, 'listener_type')) + '/' + ($PerfRpt::G($tu, $u, 'listener'))
-                    $m = $PerfRpt::GD($tu, $u, 'max-processing-time'); if ($null -ne $m -and ($null -eq $mms -or $m -gt $mms)) { $mms = $m }
-                    if ($prevL.ContainsKey($lk)) {
-                        $q0 = $prevL[$lk]; $any = $true
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($tu, $u, 'request-count')), ($PerfRpt::GD($tu, $q0, 'request-count'))); if ($null -ne $x) { $dq += $x; if (-not $lsn.ContainsKey($lk)) { $lsn[$lk] = 0.0 }; $lsn[$lk] += $x }
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($tu, $u, 'error-count')), ($PerfRpt::GD($tu, $q0, 'error-count'))); if ($null -ne $x) { $de += $x }
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($tu, $u, 'processing-time')), ($PerfRpt::GD($tu, $q0, 'processing-time'))); if ($null -ne $x) { $dp += $x }
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($tu, $u, 'bytes-received')), ($PerfRpt::GD($tu, $q0, 'bytes-received'))); if ($null -ne $x) { $drx += $x }
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($tu, $u, 'bytes-sent')), ($PerfRpt::GD($tu, $q0, 'bytes-sent'))); if ($null -ne $x) { $dtx += $x }
-                    }
-                    $prevL[$lk] = $u
-                }
-                if (-not $any) { $dq = $null; $de = $null; $dp = $null; $drx = $null; $dtx = $null }
-            }
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cT - 1] = $PerfRpt::XT($ep)
-            if ($null -ne $dq -and $null -ne $dt -and $dt -gt 0) {
-                $vals[$cRps - 1] = $PerfRpt::Rnd(($dq / $dt), 2); $vals[$cEps - 1] = $PerfRpt::Rnd(($de / $dt), 3)
-                $vals[$cRx - 1] = $PerfRpt::Rnd(($drx / $dt / 1024), 1); $vals[$cTx - 1] = $PerfRpt::Rnd(($dtx / $dt / 1024), 1)
-                $vals[$cRq - 1] = $dq; $vals[$cEr - 1] = $de
-                $PerfRpt::AddV($lRps, ($dq / $dt)); $reqTot += $dq; $errTot += $de
-                if ($dq -gt 0 -and $dp -gt 0) { $a = $dp / $dq / 1000000.0; $vals[$cAms - 1] = $PerfRpt::Rnd($a, 2); $PerfRpt::AddV($lAms, $a)}
-            }
-            if ($null -ne $mms -and $mms -gt 0) { $vals[$cMms - 1] = $PerfRpt::Rnd(($mms / 1000000.0), 1)}
-            # IO ワーカー (全ワーカーの合計)
-            if ($byEp['cli_io_worker'].ContainsKey($epS)) {
-                $ti = $TB['cli_io_worker']; $b = 0.0; $mx = 0.0; $q = 0.0; $io = 0.0
-                foreach ($u in $byEp['cli_io_worker'][$epS]) {
-                    $v = $PerfRpt::GD($ti, $u, 'busy-task-thread-count'); if ($null -ne $v) { $b += $v }
-                    $v = $PerfRpt::GD($ti, $u, 'max-pool-size'); if ($null -eq $v) { $v = $PerfRpt::GD($ti, $u, 'task-max-threads')}; if ($null -ne $v) { $mx += $v }
-                    $v = $PerfRpt::GD($ti, $u, 'queue-size'); if ($null -ne $v) { $q += $v }
-                    $v = $PerfRpt::GD($ti, $u, 'io-thread-count'); if ($null -ne $v) { $io += $v }
-                }
-                $vals[$cIb - 1] = $b; $vals[$cIm - 1] = $mx; $vals[$cIu - 1] = $PerfRpt::Rnd(($PerfRpt::Div($b, $mx)), 4); $vals[$cIq - 1] = $q; $vals[$cIo - 1] = $io
-                $PerfRpt::AddV($lIb, $b); $PerfRpt::AddV($lIq, $q); $ioMax = $mx; if ($mx -gt 0 -and $b -ge $mx) { $ioFullN++ }
-            }
-            if ($byEp['cli_threadpool'].ContainsKey($epS)) {
-                $tp = $TB['cli_threadpool']; $ea = $null; $eq = $null; $xa = $null; $xq = $null; $xh = $null
-                foreach ($u in $byEp['cli_threadpool'][$epS]) {
-                    $ty = $PerfRpt::G($tp, $u, 'pool_type')
-                    if ($ty -eq 'ejb3') { $ea = [double]$ea + [double]($PerfRpt::GD($tp, $u, 'active')); $eq = [double]$eq + [double]($PerfRpt::GD($tp, $u, 'queue')) }
-                    elseif ($ty -eq 'ee-executor') { $xa = [double]$xa + [double]($PerfRpt::GD($tp, $u, 'active')); $xq = [double]$xq + [double]($PerfRpt::GD($tp, $u, 'queue')); $xh = [double]$xh + [double]($PerfRpt::GD($tp, $u, 'hung')) }
-                }
-                $vals[$cEa - 1] = $ea; $vals[$cEq - 1] = $eq; $vals[$cXa - 1] = $xa; $vals[$cXq - 1] = $xq; $vals[$cXh - 1] = $xh
-            }
-            if ($byEp['cli_session'].ContainsKey($epS)) {
-                $ts = $TB['cli_session']; $sa = 0.0; $sc = $null; $sr = $null
-                foreach ($u in $byEp['cli_session'][$epS]) {
-                    $dk = $PerfRpt::G($ts, $u, 'deployment')
-                    $v = $PerfRpt::GD($ts, $u, 'active-sessions'); if ($null -ne $v) { $sa += $v }
-                    if ($prevS.ContainsKey($dk)) {
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($ts, $u, 'sessions-created')), ($PerfRpt::GD($ts, $prevS[$dk], 'sessions-created'))); if ($null -ne $x) { $sc = [double]$sc + $x }
-                        $x = $PerfRpt::Dl(($PerfRpt::GD($ts, $u, 'rejected-sessions')), ($PerfRpt::GD($ts, $prevS[$dk], 'rejected-sessions'))); if ($null -ne $x) { $sr = [double]$sr + $x }
-                    }
-                    $prevS[$dk] = $u
-                }
-                $vals[$cSa - 1] = $sa; $vals[$cSc - 1] = $sc; $vals[$cSr - 1] = $sr; $PerfRpt::AddV($lSa, $sa)
-            }
-            if ($byEp['cli_transactions'].ContainsKey($epS)) {
-                $tt = $TB['cli_transactions']; $u = $byEp['cli_transactions'][$epS][0]
-                if ($null -ne $prevTx) {
-                    $vals[$cTc - 1] = $PerfRpt::Dl(($PerfRpt::GD($tt, $u, 'number-of-committed-transactions')), ($PerfRpt::GD($tt, $prevTx, 'number-of-committed-transactions')))
-                    $vals[$cTa - 1] = $PerfRpt::Dl(($PerfRpt::GD($tt, $u, 'number-of-aborted-transactions')), ($PerfRpt::GD($tt, $prevTx, 'number-of-aborted-transactions')))
-                    $vals[$cTt - 1] = $PerfRpt::Dl(($PerfRpt::GD($tt, $u, 'number-of-timed-out-transactions')), ($PerfRpt::GD($tt, $prevTx, 'number-of-timed-out-transactions')))
-                }
-                $vals[$cTi - 1] = $PerfRpt::GD($tt, $u, 'number-of-inflight-transactions')
-                $prevTx = $u
-            }
-            $vals[$cAr - 1] = $PerfRpt::GD($tj, $r, 'active_requests'); $vals[$cJt - 1] = $PerfRpt::GD($tj, $r, 'thread_count')
-            $vals[$cSs - 1] = $PerfRpt::G($tj, $r, 'server_state'); $vals[$cCm - 1] = $PerfRpt::GD($tj, $r, 'cli_ms')
-            $PerfRpt::AddV($lCm, ($PerfRpt::GD($tj, $r, 'cli_ms'))); $PerfRpt::AddV($lJt, ($PerfRpt::GD($tj, $r, 'thread_count')))
-            Add-Row $sh $vals ''
-            $pe = $ep
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shHT = $sh
-        $KPI['rps'] = Stat $lRps; $KPI['ams'] = Stat $lAms; $KPI['iob'] = Stat $lIb; $KPI['ioq'] = Stat $lIq; $KPI['clims'] = Stat $lCm; $KPI['jthr'] = Stat $lJt; $KPI['ses'] = Stat $lSa
-        $KPI['reqTot'] = $reqTot; $KPI['errTot'] = $errTot; $KPI['ioMax'] = $ioMax; $KPI['ioFullN'] = $ioFullN; $KPI['lsn'] = $lsn
-        $script:HTC = @{ Rps = $cRps; Eps = $cEps; Ams = $cAms; Ib = $cIb; Im = $cIm; Iq = $cIq; Sa = $cSa; Ar = $cAr; Jt = $cJt }
-    }
-
-    # ==== JVM・GC (CLI / platform-mbean) ====
-    Write-Info '集計: JVM・GC（CLI）'
-    $shJV = $null
-    if ($TB.ContainsKey('cli_jvm')) {
-        $tj = $TB['cli_jvm']
-        $gcNames = New-Object System.Collections.Generic.List[string]; $gcBy = @{}
-        if ($TB.ContainsKey('cli_gc')) { $tg = $TB['cli_gc']; foreach ($r in $tg.Rows) { $nm = $PerfRpt::G($tg, $r, 'collector'); if (-not $gcNames.Contains($nm)) { $gcNames.Add($nm) }; $gcBy[($PerfRpt::G($tg, $r, 'epoch')) + "`t" + $nm] = $r } }
-        $mpBy = @{}
-        if ($TB.ContainsKey('cli_mempool')) {
-            $tm = $TB['cli_mempool']
-            foreach ($r in $tm.Rows) {
-                $nm = $PerfRpt::G($tm, $r, 'pool'); $g2 = 'Other'
-                if ($nm -match 'Eden') { $g2 = 'Eden' } elseif ($nm -match 'Survivor') { $g2 = 'Survivor' } elseif ($nm -match 'Old|Tenured') { $g2 = 'Old' }
-                elseif ($nm -match '^Metaspace') { $g2 = 'Metaspace' } elseif ($nm -match 'Compressed') { $g2 = 'CCS' } elseif ($nm -match 'CodeHeap|Code_Cache|Code Cache') { $g2 = 'Code' }
-                $k2 = ($PerfRpt::G($tm, $r, 'epoch')) + "`t" + $g2
-                $v = $PerfRpt::GD($tm, $r, 'used'); if ($null -eq $v) { continue }
-                if ($mpBy.ContainsKey($k2)) { $mpBy[$k2] += $v } else { $mpBy[$k2] = $v }
-            }
-        }
-        $sh = New-Sheet 'JVM・GC（CLI）' 'JVM（platform-mbean）：ヒープ・メモリプール・スレッド・クラス・GC' '① jboss-cli の /core-service=platform-mbean。jstat / jcmd が使えない環境 (/tmp が書けない等) でも取得できます。GC の「区間」は前回の取得からの増分です。' 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cHu = Add-Col $sh 'ヒープ（MB）' '使用' 'heap_used' 'dec1' 9
-        $cHc = Add-Col $sh 'ヒープ（MB）' 'コミット' 'heap_committed' 'dec1' 9
-        $cHm = Add-Col $sh 'ヒープ（MB）' '最大' 'heap_max' 'dec1' 9
-        $cHp = Add-Col $sh 'ヒープ（MB）' '使用率' '(使用÷最大)' 'pct' 8
-        $cNu = Add-Col $sh '非ヒープ（MB）' '使用' 'nonheap_used' 'dec1' 9
-        $cNc = Add-Col $sh '非ヒープ（MB）' 'コミット' 'nonheap_committed' 'dec1' 9
-        $mpCols = @{}
-        foreach ($g2 in @('Eden', 'Survivor', 'Old', 'Metaspace', 'CCS', 'Code')) { $mpCols[$g2] = Add-Col $sh 'メモリプール使用量（MB）' $(switch ($g2) { 'CCS' { 'Compressed Class' } 'Code' { 'CodeHeap' } default { $g2 } }) $g2 'dec1' 9 }
-        $cTh = Add-Col $sh 'スレッド' 'スレッド数' 'thread_count' 'int' 8
-        $cTp = Add-Col $sh 'スレッド' 'ピーク' 'peak_thread_count' 'int' 7
-        $cTd = Add-Col $sh 'スレッド' 'デーモン' 'daemon_thread_count' 'int' 7
-        $cCl = Add-Col $sh 'クラス' 'ロード中' 'loaded_class_count' 'int' 9
-        $cCu = Add-Col $sh 'クラス' 'アンロード累計' 'unloaded_class_count' 'int' 9
-        $gcCols = @{}
-        foreach ($nm in $gcNames) {
-            $lab = $nm.Replace('_', ' ')
-            $gcCols[$nm] = @((Add-Col $sh ('GC: ' + $lab) '回数（区間）' 'Δ collection-count' 'int' 9), (Add-Col $sh ('GC: ' + $lab) '時間 ms（区間）' 'Δ collection-time' 'int' 10))
-        }
-        $cLa = Add-Col $sh 'OS' 'ロードアベレージ' 'system_load_average' 'dec2' 9
-        Add-CF $sh $cHp 'bar' '1' 0; Add-CF $sh $cHp 'ge' '0.85' 1
-        $prevGc = @{}
-        $lHu = NewList; $lNu = NewList; $hmx = $null; $gcDelta = @{}
-        foreach ($r in $tj.Rows) {
-            $epS = $PerfRpt::G($tj, $r, 'epoch')
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::D($epS)))
-            $hu = $PerfRpt::MB(($PerfRpt::GD($tj, $r, 'heap_used'))); $hm = $PerfRpt::MB(($PerfRpt::GD($tj, $r, 'heap_max')))
-            $vals[$cHu - 1] = $hu; $vals[$cHc - 1] = $PerfRpt::MB(($PerfRpt::GD($tj, $r, 'heap_committed'))); $vals[$cHm - 1] = $hm; $vals[$cHp - 1] = $PerfRpt::Rnd(($PerfRpt::Div($hu, $hm)), 4)
-            $vals[$cNu - 1] = $PerfRpt::MB(($PerfRpt::GD($tj, $r, 'nonheap_used'))); $vals[$cNc - 1] = $PerfRpt::MB(($PerfRpt::GD($tj, $r, 'nonheap_committed')))
-            foreach ($g2 in $mpCols.Keys) { $k2 = $epS + "`t" + $g2; if ($mpBy.ContainsKey($k2)) { $vals[$mpCols[$g2] - 1] = $PerfRpt::MB($mpBy[$k2])} }
-            $vals[$cTh - 1] = $PerfRpt::GD($tj, $r, 'thread_count'); $vals[$cTp - 1] = $PerfRpt::GD($tj, $r, 'peak_thread_count'); $vals[$cTd - 1] = $PerfRpt::GD($tj, $r, 'daemon_thread_count')
-            $vals[$cCl - 1] = $PerfRpt::GD($tj, $r, 'loaded_class_count'); $vals[$cCu - 1] = $PerfRpt::GD($tj, $r, 'unloaded_class_count'); $vals[$cLa - 1] = $PerfRpt::GD($tj, $r, 'system_load_average')
-            foreach ($nm in $gcNames) {
-                $k2 = $epS + "`t" + $nm
-                if (-not $gcBy.ContainsKey($k2)) { continue }
-                $g = $gcBy[$k2]
-                if ($prevGc.ContainsKey($nm)) {
-                    $dc = $PerfRpt::Dl(($PerfRpt::GD($tg, $g, 'collection_count')), ($PerfRpt::GD($tg, $prevGc[$nm], 'collection_count'))); $dtm = $PerfRpt::Dl(($PerfRpt::GD($tg, $g, 'collection_time_ms')), ($PerfRpt::GD($tg, $prevGc[$nm], 'collection_time_ms')))
-                    $vals[$gcCols[$nm][0] - 1] = $dc; $vals[$gcCols[$nm][1] - 1] = $dtm
-                    if (-not $gcDelta.ContainsKey($nm)) { $gcDelta[$nm] = @(0.0, 0.0) }
-                    if ($null -ne $dc) { $gcDelta[$nm][0] += $dc }; if ($null -ne $dtm) { $gcDelta[$nm][1] += $dtm }
-                }
-                $prevGc[$nm] = $g
-            }
-            $PerfRpt::AddV($lHu, $hu); $PerfRpt::AddV($lNu, $vals[$cNu - 1]); if ($null -ne $hm) { $hmx = $hm }
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shJV = $sh
-        $KPI['cliHeap'] = Stat $lHu; $KPI['cliHeapMax'] = $hmx; $KPI['cliGc'] = $gcDelta; $KPI['nonheap'] = Stat $lNu
-        $script:JVC = @{ Hu = $cHu; Hc = $cHc; Hm = $cHm; Th = $cTh; Mp = $mpCols; Gc = $gcCols }
+        $script:DSC = @{ In = $cIn; Ac = $cAc; Mx = $cMx; Wd = $cWd; Fd = $cFd }
     }
 
     # ==== ヒープ・GC (jstat -gc) ====
-    Write-Info '集計: ヒープ・GC（jstat）'
     $shJS = $null
     if ($TB.ContainsKey('jvm_jstat_gc')) {
+        Write-Info '集計: ヒープ・GC（jstat）'
         $t = $TB['jvm_jstat_gc']
         $sh = New-Sheet 'ヒープ・GC（jstat）' 'ヒープ・GC（jstat -gc）' '② jstat -gc。容量・使用量は MB、GC の「区間」は前回の行からの増分、GC 時間率は区間の GC 時間 ÷ 経過時間です。Full GC・Old 使用率 85% 以上・GC 時間率 5% 以上は濃淡で表示します。' 1
         $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
@@ -1294,8 +846,7 @@ function Build-Report([string]$dir, [string]$outPath) {
         $cGc = Add-Col $sh 'GC（累計）' 'GCT 秒' 'GCT' 'dec3' 8
         Add-CF $sh $cOp 'bar' '1' 0; Add-CF $sh $cOp 'ge' '0.85' 1; Add-CF $sh $cFn 'gt' '0' 0; Add-CF $sh $cGr 'ge' '0.05' 1
         $p = $null
-        $lHu = NewList; $lOu = NewList; $lOp = NewList; $lMu = NewList; $lGr = NewList; $lYa = NewList; $ygS = 0.0; $ytS = 0.0; $fgS = 0.0; $ftS = 0.0; $cS = 0.0; $gtS = 0.0; $hcMax = $null
-        $first = $null; $lastR = $null
+        $lHu = NewList; $lOu = NewList; $lOp = NewList; $lMu = NewList; $lYa = NewList; $ygS = 0.0; $ytS = 0.0; $fgS = 0.0; $ftS = 0.0; $cS = 0.0; $gtS = 0.0; $hcMax = $null
         foreach ($r in $t.Rows) {
             $vals = New-Object 'object[]' $sh.Cols.Count
             $ep = $PerfRpt::GD($t, $r, 'epoch')
@@ -1317,422 +868,62 @@ function Build-Report([string]$dir, [string]$outPath) {
                 $gt = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'GCT')), ($PerfRpt::GD($t, $p, 'GCT')))
                 $vals[$cYn - 1] = $yn; $vals[$cYt - 1] = $PerfRpt::Rnd(([double]$yt * 1000), 1); $vals[$cFn - 1] = $fn; $vals[$cFt - 1] = $PerfRpt::Rnd(([double]$ft * 1000), 1)
                 $vals[$cCn - 1] = $cgcn; $vals[$cCt - 1] = $PerfRpt::Rnd(([double]$cgct * 1000), 1); $vals[$cGt - 1] = $PerfRpt::Rnd(([double]$gt * 1000), 1)
-                if ($null -ne $yn -and $yn -gt 0 -and $null -ne $yt) { $a = $yt * 1000 / $yn; $vals[$cYa - 1] = $PerfRpt::Rnd($a, 1); $PerfRpt::AddV($lYa, $a)}
-                if ($el -gt 0 -and $null -ne $gt) { $gr = $gt / $el; $vals[$cGr - 1] = $PerfRpt::Rnd($gr, 4); $PerfRpt::AddV($lGr, $gr)}
+                if ($null -ne $yn -and $yn -gt 0 -and $null -ne $yt) { $a = $yt * 1000 / $yn; $vals[$cYa - 1] = $PerfRpt::Rnd($a, 1); $PerfRpt::AddV($lYa, $a) }
+                if ($el -gt 0 -and $null -ne $gt) { $vals[$cGr - 1] = $PerfRpt::Rnd(($gt / $el), 4) }
                 if ($null -ne $yn) { $ygS += $yn }; if ($null -ne $yt) { $ytS += $yt }; if ($null -ne $fn) { $fgS += $fn }; if ($null -ne $ft) { $ftS += $ft }; if ($null -ne $cgcn) { $cS += $cgcn }; if ($null -ne $gt) { $gtS += $gt }
-            } else { $first = $r }
+            }
             $PerfRpt::AddV($lHu, ($PerfRpt::KBtoMB($hu))); $PerfRpt::AddV($lOu, ($PerfRpt::KBtoMB($ou))); $PerfRpt::AddV($lOp, $op); $PerfRpt::AddV($lMu, ($PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'MU')))))
             if ($null -ne $hc -and ($null -eq $hcMax -or $hc -gt $hcMax)) { $hcMax = $hc }
             Add-Row $sh $vals ''
-            $p = $r; $lastR = $r
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shJS = $sh
-        $elapsed = 0.0; if ($null -ne $first -and $null -ne $lastR) { $elapsed = ($PerfRpt::GD($t, $lastR, 'epoch')) - ($PerfRpt::GD($t, $first, 'epoch')) }
-        $KPI['jsHeap'] = Stat $lHu; $KPI['jsOld'] = Stat $lOu; $KPI['jsOldP'] = Stat $lOp; $KPI['jsMeta'] = Stat $lMu; $KPI['jsGr'] = Stat $lGr; $KPI['jsYa'] = Stat $lYa
-        $KPI['jsY'] = $ygS; $KPI['jsYt'] = $ytS; $KPI['jsF'] = $fgS; $KPI['jsFt'] = $ftS; $KPI['jsC'] = $cS; $KPI['jsGt'] = $gtS; $KPI['jsEl'] = $elapsed; $KPI['jsHcMax'] = $PerfRpt::KBtoMB($hcMax)
-        $script:JSC = @{ Hu = $cHu; Hc = $cHc; Eu = $cEu; Su = $cSu; Ou = $cOu; Oc = $cOc; Mu = $cMu; Mc = $cMc; Cu = $cCu; Yn = $cYn; Fn = $cFn; Cn = $cCn; Yt = $cYt; Ft = $cFt; Ct = $cCt; Gt = $cGt; Gr = $cGr }
-    }
-
-    # ==== ヒープ詳細 (jcmd GC.heap_info) ====
-    if ($TB.ContainsKey('jvm_jcmd_heap')) {
-        $t = $TB['jvm_jcmd_heap']
-        $sh = New-Sheet 'ヒープ詳細（jcmd）' 'ヒープ詳細（jcmd GC.heap_info）' '② jcmd <pid> GC.heap_info を数値化したもの。G1 はリージョン数、Serial / Parallel は世代ごとの容量・使用量が入ります。元の出力は jvm_jcmd.log にあります。' 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cG = Add-Col $sh '基本' 'GC' 'gc' 'textc' 7
-        $cHt = Add-Col $sh 'ヒープ（MB）' '容量' 'heap_total_kb' 'dec1' 9
-        $cHu = Add-Col $sh 'ヒープ（MB）' '使用' 'heap_used_kb' 'dec1' 9
-        $cHp = Add-Col $sh 'ヒープ（MB）' '使用率' '(使用÷容量)' 'pct' 8
-        $cRs = Add-Col $sh 'G1 リージョン' 'サイズ KB' 'region_size_kb' 'int' 8
-        $cYr = Add-Col $sh 'G1 リージョン' 'Young 数' 'young_regions' 'int' 8
-        $cYk = Add-Col $sh 'G1 リージョン' 'Young MB' 'young_kb' 'dec1' 8
-        $cSr = Add-Col $sh 'G1 リージョン' 'Survivor 数' 'survivor_regions' 'int' 9
-        $cSk = Add-Col $sh 'G1 リージョン' 'Survivor MB' 'survivor_kb' 'dec1' 9
-        $cYg = Add-Col $sh '世代（Serial / Parallel）' 'Young 使用 MB' 'young_gen_used_kb' 'dec1' 10
-        $cOg = Add-Col $sh '世代（Serial / Parallel）' 'Old 使用 MB' 'old_gen_used_kb' 'dec1' 10
-        $cMu = Add-Col $sh 'メタスペース（MB）' '使用' 'metaspace_used_kb' 'dec1' 8
-        $cMc = Add-Col $sh 'メタスペース（MB）' 'コミット' 'metaspace_committed_kb' 'dec1' 9
-        $cMr = Add-Col $sh 'メタスペース（MB）' '予約' 'metaspace_reserved_kb' 'dec1' 9
-        $cCu = Add-Col $sh 'クラス空間（MB）' '使用' 'class_used_kb' 'dec1' 8
-        $cCc = Add-Col $sh 'クラス空間（MB）' 'コミット' 'class_committed_kb' 'dec1' 9
-        $cMs = Add-Col $sh '基本' 'jcmd 所要 ms' 'jcmd_ms' 'int' 9
-        foreach ($r in $t.Rows) {
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $ht = $PerfRpt::GD($t, $r, 'heap_total_kb'); $hu = $PerfRpt::GD($t, $r, 'heap_used_kb')
-            $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::GD($t, $r, 'epoch'))); $vals[$cG - 1] = $PerfRpt::G($t, $r, 'gc')
-            $vals[$cHt - 1] = $PerfRpt::KBtoMB($ht); $vals[$cHu - 1] = $PerfRpt::KBtoMB($hu); $vals[$cHp - 1] = $PerfRpt::Rnd(($PerfRpt::Div($hu, $ht)), 4)
-            $vals[$cRs - 1] = $PerfRpt::GD($t, $r, 'region_size_kb'); $vals[$cYr - 1] = $PerfRpt::GD($t, $r, 'young_regions'); $vals[$cYk - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'young_kb')))
-            $vals[$cSr - 1] = $PerfRpt::GD($t, $r, 'survivor_regions'); $vals[$cSk - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'survivor_kb')))
-            $vals[$cYg - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'young_gen_used_kb'))); $vals[$cOg - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'old_gen_used_kb')))
-            $vals[$cMu - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'metaspace_used_kb'))); $vals[$cMc - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'metaspace_committed_kb'))); $vals[$cMr - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'metaspace_reserved_kb')))
-            $vals[$cCu - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'class_used_kb'))); $vals[$cCc - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'class_committed_kb'))); $vals[$cMs - 1] = $PerfRpt::GD($t, $r, 'jcmd_ms')
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh)
-    }
-    foreach ($t in $extraJstat) {
-        $opt = $t.Name -replace '^jvm_jstat_', '' -replace '\.csv$', ''
-        $sh = New-Sheet ('jstat -' + $opt) ('jstat -' + $opt) ('② jstat -' + $opt + ' の出力そのものです (列名は jstat の見出し)。') 1
-        $cols = @()
-        foreach ($h in $t.H) {
-            if ($h -eq 'epoch') { $cols += 0; continue }
-            if ($h -eq 'timestamp') { $cols += (Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19); continue }
-            $f = 'dec1'; if ($h -match 'GCC|LGCC') { $f = 'text' }
-            $cols += (Add-Col $sh 'jstat' $h $h $f $(if ($f -eq 'text') { 22 } else { 9 }))
-        }
-        foreach ($r in $t.Rows) {
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            for ($i = 0; $i -lt $t.H.Length; $i++) {
-                $c = $cols[$i]; if ($c -eq 0) { continue }
-                if ($t.H[$i] -eq 'timestamp') { $vals[$c - 1] = $PerfRpt::XT(($PerfRpt::GD($t, $r, 'epoch')))} else { $vals[$c - 1] = $r[$i] }
-            }
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh)
-    }
-
-    # ==== CPU・メモリ (top) ====
-    Write-Info '集計: CPU・メモリ（top）'
-    $shTop = $null
-    $ovh = @{}
-    if ($TB.ContainsKey('os_top_summary')) {
-        $ts = $TB['os_top_summary']
-        $pBy = @{}
-        if ($TB.ContainsKey('os_top_process')) {
-            $tp = $TB['os_top_process']
-            foreach ($r in $tp.Rows) {
-                $k2 = $PerfRpt::G($tp, $r, 'epoch')
-                if (-not $pBy.ContainsKey($k2)) { $pBy[$k2] = @{} }
-                $role = $PerfRpt::G($tp, $r, 'role')
-                $c = $PerfRpt::GD($tp, $r, 'cpu_pct'); $m = $PerfRpt::GD($tp, $r, 'res_kb')
-                if (-not $pBy[$k2].ContainsKey($role)) { $pBy[$k2][$role] = @(0.0, 0.0, 0) }
-                $pBy[$k2][$role][0] += [double]$c; $pBy[$k2][$role][1] += [double]$m; $pBy[$k2][$role][2] += 1
-            }
-        }
-        $sh = New-Sheet 'CPU・メモリ（top）' 'CPU・メモリ（top）' ('③ top -b の要約行とプロセス行。プロセスの %CPU は「1 コア = 100%」(複数コアを使うと 100% を超えます)。CPU 内訳は全 CPU に対する割合です。収集プロセス (jboss-cli・jstat・jcmd・スクリプト) 自身の負荷も確認できます。') 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cL1 = Add-Col $sh 'ロードアベレージ' '1 分' 'load1' 'dec2' 7
-        $cL5 = Add-Col $sh 'ロードアベレージ' '5 分' 'load5' 'dec2' 7
-        $cL15 = Add-Col $sh 'ロードアベレージ' '15 分' 'load15' 'dec2' 7
-        $cCu = Add-Col $sh 'CPU（全体に対する %）' '使用率' '100 - id' 'dec1' 8
-        $cUs = Add-Col $sh 'CPU（全体に対する %）' 'us' 'cpu_us' 'dec1' 6
-        $cSy = Add-Col $sh 'CPU（全体に対する %）' 'sy' 'cpu_sy' 'dec1' 6
-        $cWa = Add-Col $sh 'CPU（全体に対する %）' 'wa' 'cpu_wa' 'dec1' 6
-        $cSt = Add-Col $sh 'CPU（全体に対する %）' 'st' 'cpu_st' 'dec1' 6
-        $cMt = Add-Col $sh 'メモリ（MiB）' '合計' 'mem_total_mib' 'dec1' 8
-        $cMu = Add-Col $sh 'メモリ（MiB）' '使用' 'mem_used_mib' 'dec1' 8
-        $cMa = Add-Col $sh 'メモリ（MiB）' '利用可能' 'mem_avail_mib' 'dec1' 8
-        $cMb = Add-Col $sh 'メモリ（MiB）' 'buff/cache' 'mem_buffcache_mib' 'dec1' 9
-        $cJc = Add-Col $sh 'JBoss EAP' '%CPU' 'role=jboss cpu_pct' 'dec1' 8
-        $cJr = Add-Col $sh 'JBoss EAP' 'RES MB' 'role=jboss res_kb' 'dec1' 8
-        $cKc = Add-Col $sh '収集プロセス（性能試験用）' 'jboss-cli %CPU' 'role=jboss-cli' 'dec1' 10
-        $cKr = Add-Col $sh '収集プロセス（性能試験用）' 'jboss-cli RES MB' 'role=jboss-cli' 'dec1' 10
-        $cSc = Add-Col $sh '収集プロセス（性能試験用）' 'jstat %CPU' 'role=jstat' 'dec1' 9
-        $cSr = Add-Col $sh '収集プロセス（性能試験用）' 'jstat RES MB' 'role=jstat' 'dec1' 9
-        $cCc = Add-Col $sh '収集プロセス（性能試験用）' 'jcmd %CPU' 'role=jcmd' 'dec1' 9
-        $cPc = Add-Col $sh '収集プロセス（性能試験用）' 'スクリプト %CPU' 'perf-metrics/top/ps' 'dec1' 10
-        $cOt = Add-Col $sh '収集プロセス（性能試験用）' '収集の合計 %CPU' '(上の合計)' 'dec1' 10
-        $cTk = Add-Col $sh 'タスク' 'プロセス数' 'tasks_total' 'int' 8
-        $lJc = NewList; $lJr = NewList; $lCu = NewList; $lL1 = NewList; $lOt = NewList; $lKr = NewList; $lSr = NewList; $lKc = NewList
-        foreach ($r in $ts.Rows) {
-            $epS = $PerfRpt::G($ts, $r, 'epoch')
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::D($epS)))
-            $vals[$cL1 - 1] = $PerfRpt::GD($ts, $r, 'load1'); $vals[$cL5 - 1] = $PerfRpt::GD($ts, $r, 'load5'); $vals[$cL15 - 1] = $PerfRpt::GD($ts, $r, 'load15')
-            $id = $PerfRpt::GD($ts, $r, 'cpu_id'); if ($null -ne $id) { $vals[$cCu - 1] = $PerfRpt::Rnd((100 - $id), 1); $PerfRpt::AddV($lCu, (100 - $id))}
-            $vals[$cUs - 1] = $PerfRpt::GD($ts, $r, 'cpu_us'); $vals[$cSy - 1] = $PerfRpt::GD($ts, $r, 'cpu_sy'); $vals[$cWa - 1] = $PerfRpt::GD($ts, $r, 'cpu_wa'); $vals[$cSt - 1] = $PerfRpt::GD($ts, $r, 'cpu_st')
-            $vals[$cMt - 1] = $PerfRpt::Rnd(($PerfRpt::GD($ts, $r, 'mem_total_mib')), 1); $vals[$cMu - 1] = $PerfRpt::Rnd(($PerfRpt::GD($ts, $r, 'mem_used_mib')), 1); $vals[$cMa - 1] = $PerfRpt::Rnd(($PerfRpt::GD($ts, $r, 'mem_avail_mib')), 1); $vals[$cMb - 1] = $PerfRpt::Rnd(($PerfRpt::GD($ts, $r, 'mem_buffcache_mib')), 1)
-            $vals[$cTk - 1] = $PerfRpt::GD($ts, $r, 'tasks_total'); $PerfRpt::AddV($lL1, ($PerfRpt::GD($ts, $r, 'load1')))
-            if ($pBy.ContainsKey($epS)) {
-                $pr = $pBy[$epS]
-                if ($pr.ContainsKey('jboss')) { $vals[$cJc - 1] = $PerfRpt::Rnd($pr['jboss'][0], 1); $vals[$cJr - 1] = $PerfRpt::Rnd(($pr['jboss'][1] / 1024), 1); $PerfRpt::AddV($lJc, $pr['jboss'][0]); $PerfRpt::AddV($lJr, ($pr['jboss'][1] / 1024))}
-                $kc = 0.0; $tot = 0.0
-                if ($pr.ContainsKey('jboss-cli')) { $kc = $pr['jboss-cli'][0]; $vals[$cKc - 1] = $PerfRpt::Rnd($kc, 1); $vals[$cKr - 1] = $PerfRpt::Rnd(($pr['jboss-cli'][1] / 1024), 1); $PerfRpt::AddV($lKr, ($pr['jboss-cli'][1] / 1024))} else { $vals[$cKc - 1] = 0.0 }
-                $tot += $kc; $PerfRpt::AddV($lKc, $kc)
-                $sc = 0.0; if ($pr.ContainsKey('jstat')) { $sc = $pr['jstat'][0]; $vals[$cSr - 1] = $PerfRpt::Rnd(($pr['jstat'][1] / 1024), 1); $PerfRpt::AddV($lSr, ($pr['jstat'][1] / 1024))}; $vals[$cSc - 1] = $PerfRpt::Rnd($sc, 1); $tot += $sc
-                $cc = 0.0; if ($pr.ContainsKey('jcmd')) { $cc = $pr['jcmd'][0] }; $vals[$cCc - 1] = $PerfRpt::Rnd($cc, 1); $tot += $cc
-                $pc = 0.0; foreach ($rl in @('perf-metrics', 'top', 'ps')) { if ($pr.ContainsKey($rl)) { $pc += $pr[$rl][0] } }; $vals[$cPc - 1] = $PerfRpt::Rnd($pc, 1); $tot += $pc
-                $vals[$cOt - 1] = $PerfRpt::Rnd($tot, 1); $PerfRpt::AddV($lOt, $tot)
-                foreach ($rl in @('jboss-cli', 'jstat', 'jcmd', 'perf-metrics', 'top', 'ps')) {
-                    if (-not $ovh.ContainsKey($rl)) { $ovh[$rl] = @((NewList), (NewList)) }
-                    if ($pr.ContainsKey($rl)) { $PerfRpt::AddV($ovh[$rl][0], $pr[$rl][0]); $PerfRpt::AddV($ovh[$rl][1], ($pr[$rl][1] / 1024))} else { $PerfRpt::AddV($ovh[$rl][0], 0.0)}
-                }
-            }
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shTop = $sh
-        $KPI['jbCpu'] = Stat $lJc; $KPI['jbRes'] = Stat $lJr; $KPI['sysCpu'] = Stat $lCu; $KPI['load1'] = Stat $lL1; $KPI['ovhCpu'] = Stat $lOt
-        $script:TPC = @{ Jc = $cJc; Jr = $cJr; Kc = $cKc; Sc = $cSc; Cc = $cCc; Pc = $cPc; Ot = $cOt; L1 = $cL1; L5 = $cL5; L15 = $cL15; Cu = $cCu; Mu = $cMu; Kr = $cKr; Sr = $cSr }
-    }
-
-    # ==== スレッド別 CPU (top -H) ====
-    Write-Info '集計: スレッド別 CPU'
-    if ($TB.ContainsKey('os_top_threads')) {
-        $t = $TB['os_top_threads']
-        $frames = @{}; $agg = @{}
-        foreach ($r in $t.Rows) {
-            $ep = $PerfRpt::G($t, $r, 'epoch'); $frames[$ep] = 1
-            $nm = [string]($PerfRpt::G($t, $r, 'thread'))
-            $gname = [regex]::Replace($nm, '[0-9]+', '#')
-            $c = $PerfRpt::D(($PerfRpt::G($t, $r, 'cpu_pct'))); if ($null -eq $c) { $c = 0.0 }
-            if (-not $agg.ContainsKey($gname)) { $agg[$gname] = @{ Sum = @{}; MaxOne = 0.0; Seen = 0; Names = @{} } }
-            $a = $agg[$gname]
-            if ($a.Sum.ContainsKey($ep)) { $a.Sum[$ep] += $c } else { $a.Sum[$ep] = $c }
-            if ($c -gt $a.MaxOne) { $a.MaxOne = $c }
-            $a.Seen++; $a.Names[$nm] = 1
-        }
-        $nf = $frames.Count
-        $sh = New-Sheet 'スレッド別CPU（top）' 'JBoss のスレッド別 CPU（top -H、スレッド名ごとに集計）' ('③ top -H -p <JBoss の PID> で各回の %CPU 上位 ' + $(if ($meta.Contains('perf.top_threads')) { [string]$meta['perf.top_threads'] + ' 件' } else { '' }) + 'のスレッドを記録し、スレッド名の数字を # にまとめて集計しています (例: default task-12 → default task-#)。上位に入らなかった回は 0 として平均しています。%CPU は 1 コア = 100%。') 1
-        $cN = Add-Col $sh 'スレッド' 'スレッド名（まとめ）' 'thread' 'text' 34
-        $cAv = Add-Col $sh '%CPU（グループ合計）' '平均' 'avg' 'dec2' 9
-        $cMx = Add-Col $sh '%CPU（グループ合計）' '最大' 'max' 'dec1' 9
-        $cMo = Add-Col $sh '%CPU（1 スレッド）' '最大' 'max(1 thread)' 'dec1' 9
-        $cSe = Add-Col $sh '出現' '上位に入った回数' 'count' 'int' 10
-        $cFr = Add-Col $sh '出現' '割合' '(回数÷取得回数)' 'pct' 8
-        $cTn = Add-Col $sh '出現' 'スレッド数' '(名前の種類)' 'int' 8
-        Add-CF $sh $cAv 'bar' ([string]([Math]::Max(1, [Math]::Ceiling((@($agg.Values | ForEach-Object { ($_.Sum.Values | Measure-Object -Sum).Sum }) | Measure-Object -Maximum).Maximum / [Math]::Max(1, $nf))))) 0
-        $list = @()
-        foreach ($gname in $agg.Keys) {
-            $a = $agg[$gname]; $sum = 0.0; $mx = 0.0
-            foreach ($v in $a.Sum.Values) { $sum += $v; if ($v -gt $mx) { $mx = $v } }
-            $list += [pscustomobject]@{ N = $gname; Avg = $(if ($nf -gt 0) { $sum / $nf } else { 0 }); Max = $mx; MaxOne = $a.MaxOne; Seen = $a.Sum.Count; Names = $a.Names.Count }
-        }
-        foreach ($x in ($list | Sort-Object -Property @{ Expression = 'Avg'; Descending = $true }, @{ Expression = 'Max'; Descending = $true })) {
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cN - 1] = $x.N; $vals[$cAv - 1] = $PerfRpt::Rnd($x.Avg, 2); $vals[$cMx - 1] = $PerfRpt::Rnd($x.Max, 1); $vals[$cMo - 1] = $PerfRpt::Rnd($x.MaxOne, 1)
-            $vals[$cSe - 1] = $x.Seen; $vals[$cFr - 1] = $PerfRpt::Rnd(($PerfRpt::Div($x.Seen, $nf)), 4); $vals[$cTn - 1] = $x.Names
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh)
-        $KPI['threads'] = $list | Sort-Object -Property Avg -Descending | Select-Object -First 5
-    }
-
-    # ==== プロセス (ps) ====
-    Write-Info '集計: プロセス（ps）'
-    $shPs = $null
-    if ($TB.ContainsKey('os_ps')) {
-        $t = $TB['os_ps']
-        $sh = New-Sheet 'プロセス（ps）' 'プロセス（ps）：JBoss のスレッド数・メモリ・CPU と収集プロセスの合計' '③ ps -e -o pid,ppid,user,stat,nlwp,rss,vsz,pcpu,pmem,etimes,times,args。CPU（区間）は累計 CPU 秒の増分 ÷ 経過秒で、1 コア = 100% です (ps の累計 CPU 秒は 1 秒単位のため、短い間隔では粗い値になります)。' 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cPid = Add-Col $sh 'JBoss EAP' 'PID' 'pid' 'int' 7
-        $cNl = Add-Col $sh 'JBoss EAP' 'スレッド数' 'nlwp' 'int' 9
-        $cRs = Add-Col $sh 'JBoss EAP' 'RSS MB' 'rss_kb' 'dec1' 9
-        $cVs = Add-Col $sh 'JBoss EAP' 'VSZ MB' 'vsz_kb' 'dec1' 10
-        $cCp = Add-Col $sh 'JBoss EAP' 'CPU（区間）%' 'Δ cpu_time_s÷経過' 'dec1' 10
-        $cCs = Add-Col $sh 'JBoss EAP' '累計 CPU 秒' 'cpu_time_s' 'int' 9
-        $cEt = Add-Col $sh 'JBoss EAP' '稼働秒' 'etimes' 'int' 9
-        $cKr = Add-Col $sh '収集プロセス（性能試験用）' 'RSS 合計 MB' 'jboss-cli+jstat+jcmd+scripts' 'dec1' 11
-        $cKc = Add-Col $sh '収集プロセス（性能試験用）' 'CPU（区間）%' 'Δ cpu_time_s÷経過' 'dec1' 10
-        $cKn = Add-Col $sh '収集プロセス（性能試験用）' 'プロセス数' 'count' 'int' 9
-        $cNp = Add-Col $sh '全体' 'プロセス数' 'count' 'int' 8
-        $cAr = Add-Col $sh '全体' 'RSS 合計 MB' 'sum rss_kb' 'dec1' 10
-        $byEp = New-Object System.Collections.Specialized.OrderedDictionary
-        $ei = $t.I['epoch']
-        foreach ($r in $t.Rows) { $k2 = $r[$ei]; if (-not $byEp.Contains($k2)) { $byEp[$k2] = New-Object System.Collections.Generic.List[object] }; $byEp[$k2].Add($r) }
-        $pj = $null; $pk = $null; $pe = $null
-        $lNl = NewList; $lRs = NewList; $lKr = NewList; $lCp = NewList
-        $collect = @{ 'jboss-cli' = 1; 'jstat' = 1; 'jcmd' = 1; 'perf-metrics' = 1; 'top' = 1; 'ps' = 1 }
-        foreach ($k2 in $byEp.Keys) {
-            $ep = $PerfRpt::D($k2)
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cT - 1] = $PerfRpt::XT($ep)
-            $jb = $null; $kr = 0.0; $kcpu = 0.0; $kn = 0; $np = 0; $ar = 0.0
-            foreach ($r in $byEp[$k2]) {
-                $np++; $rs = $PerfRpt::GD($t, $r, 'rss_kb'); if ($null -ne $rs) { $ar += $rs }
-                $role = $PerfRpt::G($t, $r, 'role')
-                if ($role -eq 'jboss') { $jb = $r }
-                elseif ($collect.ContainsKey($role)) { $kn++; if ($null -ne $rs) { $kr += $rs }; $v = $PerfRpt::GD($t, $r, 'cpu_time_s'); if ($null -ne $v) { $kcpu += $v } }
-            }
-            if ($null -ne $jb) {
-                $vals[$cPid - 1] = $PerfRpt::GD($t, $jb, 'pid'); $vals[$cNl - 1] = $PerfRpt::GD($t, $jb, 'nlwp'); $vals[$cRs - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $jb, 'rss_kb'))); $vals[$cVs - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $jb, 'vsz_kb')))
-                $vals[$cCs - 1] = $PerfRpt::GD($t, $jb, 'cpu_time_s'); $vals[$cEt - 1] = $PerfRpt::GD($t, $jb, 'etimes')
-                if ($null -ne $pj -and $null -ne $pe -and $ep -gt $pe -and ($PerfRpt::GD($t, $pj, 'pid')) -eq ($PerfRpt::GD($t, $jb, 'pid'))) {
-                    $x = $PerfRpt::Dl(($PerfRpt::GD($t, $jb, 'cpu_time_s')), ($PerfRpt::GD($t, $pj, 'cpu_time_s'))); if ($null -ne $x) { $c = $x / ($ep - $pe) * 100; $vals[$cCp - 1] = $PerfRpt::Rnd($c, 1); $PerfRpt::AddV($lCp, $c)}
-                }
-                $PerfRpt::AddV($lNl, ($PerfRpt::GD($t, $jb, 'nlwp'))); $PerfRpt::AddV($lRs, ($PerfRpt::KBtoMB(($PerfRpt::GD($t, $jb, 'rss_kb'))))); $pj = $jb
-            }
-            if ($null -ne $pk -and $null -ne $pe -and $ep -gt $pe) { $x = $kcpu - $pk; if ($x -ge 0) { $vals[$cKc - 1] = $PerfRpt::Rnd(($x / ($ep - $pe) * 100), 1)} }
-            $vals[$cKr - 1] = $PerfRpt::KBtoMB($kr); $vals[$cKn - 1] = $kn; $vals[$cNp - 1] = $np; $vals[$cAr - 1] = $PerfRpt::KBtoMB($ar)
-            $PerfRpt::AddV($lKr, ($PerfRpt::KBtoMB($kr)))
-            Add-Row $sh $vals ''
-            $pk = $kcpu; $pe = $ep
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shPs = $sh
-        $KPI['psNl'] = Stat $lNl; $KPI['psRs'] = Stat $lRs; $KPI['psKr'] = Stat $lKr; $KPI['psCp'] = Stat $lCp
-        $script:PSC = @{ Nl = $cNl; Rs = $cRs; Kr = $cKr; Cp = $cCp }
-
-        # 一覧 (全行)
-        $sh = New-Sheet 'プロセス一覧（ps）' 'プロセス一覧（ps の全行）' '③ ps の出力を 1 プロセス 1 行で載せています。オートフィルターで「役割」「PID」などを絞り込めます。役割: jboss = JBoss EAP、jboss-cli / jstat / jcmd / perf-metrics / top / ps = 性能試験用の収集プロセス。パスワードらしき値は伏せています。' 2
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cPid = Add-Col $sh '基本' 'PID' 'pid' 'int' 7
-        $cPp = Add-Col $sh '基本' 'PPID' 'ppid' 'int' 7
-        $cRo = Add-Col $sh '基本' '役割' 'role' 'textc' 12
-        $cUs = Add-Col $sh '基本' 'ユーザー' 'user' 'textc' 9
-        $cSt = Add-Col $sh '状態' '状態' 'stat' 'textc' 6
-        $cNl = Add-Col $sh '状態' 'スレッド数' 'nlwp' 'int' 8
-        $cRs = Add-Col $sh 'メモリ' 'RSS MB' 'rss_kb' 'dec1' 8
-        $cVs = Add-Col $sh 'メモリ' 'VSZ MB' 'vsz_kb' 'dec1' 9
-        $cPm = Add-Col $sh 'メモリ' '%MEM' 'pmem' 'dec1' 7
-        $cPc = Add-Col $sh 'CPU' '%CPU（起動からの平均）' 'pcpu' 'dec1' 11
-        $cCs = Add-Col $sh 'CPU' '累計 CPU 秒' 'cpu_time_s' 'int' 9
-        $cEt = Add-Col $sh 'CPU' '稼働秒' 'etimes' 'int' 8
-        $cAg = Add-Col $sh 'コマンド' 'コマンドライン' 'args' 'text' 100
-        foreach ($r in $t.Rows) {
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $vals[$cT - 1] = $PerfRpt::XT(($PerfRpt::GD($t, $r, 'epoch'))); $vals[$cPid - 1] = $PerfRpt::GD($t, $r, 'pid'); $vals[$cPp - 1] = $PerfRpt::GD($t, $r, 'ppid'); $vals[$cRo - 1] = $PerfRpt::G($t, $r, 'role')
-            $vals[$cUs - 1] = $PerfRpt::G($t, $r, 'user'); $vals[$cSt - 1] = $PerfRpt::G($t, $r, 'stat'); $vals[$cNl - 1] = $PerfRpt::GD($t, $r, 'nlwp')
-            $vals[$cRs - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'rss_kb'))); $vals[$cVs - 1] = $PerfRpt::KBtoMB(($PerfRpt::GD($t, $r, 'vsz_kb'))); $vals[$cPm - 1] = $PerfRpt::GD($t, $r, 'pmem')
-            $vals[$cPc - 1] = $PerfRpt::GD($t, $r, 'pcpu'); $vals[$cCs - 1] = $PerfRpt::GD($t, $r, 'cpu_time_s'); $vals[$cEt - 1] = $PerfRpt::GD($t, $r, 'etimes')
-            $a = [string]($PerfRpt::G($t, $r, 'args')); if ($a.Length -gt 1000) { $a = $a.Substring(0, 1000) + ' …' }
-            $vals[$cAg - 1] = $a
-            Add-Row $sh $vals ''
-        }
-        Fix-Ranges $sh; $Sheets.Add($sh)
-    }
-
-    # ==== コンテナ (cgroup) ====
-    Write-Info '集計: コンテナ（cgroup）'
-    $shCg = $null
-    if ($TB.ContainsKey('os_cgroup')) {
-        $t = $TB['os_cgroup']
-        $sh = New-Sheet 'コンテナ（cgroup）' 'コンテナ（cgroup）：CPU 使用率・スロットリング・メモリ' ('③ /sys/fs/cgroup。CPU 使用率は「1 vCPU = 100%」で、上限比は CPU 上限 (cpu.max / cfs_quota) に対する割合です。スロットリングは CPU 上限に当たって待たされた回数・時間 (区間)。メモリ使用率 90% 以上・OOM kill は濃淡で表示します。') 1
-        $cT = Add-Col $sh '基本' '日時' 'timestamp' 'dt' 19
-        $cCu = Add-Col $sh 'CPU' '使用率 %' 'Δ usage_usec÷経過' 'dec1' 9
-        $cQ = Add-Col $sh 'CPU' '上限 vCPU' 'cpu_quota_cores' 'dec2' 9
-        $cQr = Add-Col $sh 'CPU' '上限比' '(使用率÷上限)' 'pct' 8
-        $cTn = Add-Col $sh 'CPU' 'スロットリング回数' 'Δ nr_throttled' 'int' 11
-        $cTt = Add-Col $sh 'CPU' 'スロットリング ms' 'Δ throttled_usec' 'dec1' 11
-        $cTr = Add-Col $sh 'CPU' 'スロットリング率' 'Δ nr_throttled÷Δ nr_periods' 'pct' 10
-        $cMu = Add-Col $sh 'メモリ' '使用 MB' 'memory_usage_bytes' 'dec1' 9
-        $cMl = Add-Col $sh 'メモリ' '上限 MB' 'memory_limit_bytes' 'dec1' 9
-        $cMp = Add-Col $sh 'メモリ' '使用率' '(使用÷上限)' 'pct' 8
-        $cMa = Add-Col $sh 'メモリ' 'anon MB' 'memory_anon_bytes' 'dec1' 9
-        $cMf = Add-Col $sh 'メモリ' 'file MB' 'memory_file_bytes' 'dec1' 9
-        $cOo = Add-Col $sh 'メモリ' 'OOM kill（区間）' 'Δ memory_oom_kill' 'int' 10
-        $cPc = Add-Col $sh 'その他' 'プロセス数' 'pids_current' 'int' 9
-        $cVv = Add-Col $sh 'その他' 'cgroup' 'cgroup_version' 'textc' 7
-        Add-CF $sh $cQr 'bar' '1' 0; Add-CF $sh $cTn 'gt' '0' 2; Add-CF $sh $cMp 'bar' '1' 0; Add-CF $sh $cMp 'ge' '0.9' 1; Add-CF $sh $cOo 'gt' '0' 0
-        $p = $null
-        $lCu = NewList; $lQr = NewList; $lMu = NewList; $lMp = NewList; $thN = 0.0; $thT = 0.0; $oom = 0.0; $quota = $null; $mlim = $null
-        foreach ($r in $t.Rows) {
-            $vals = New-Object 'object[]' $sh.Cols.Count
-            $ep = $PerfRpt::GD($t, $r, 'epoch')
-            $vals[$cT - 1] = $PerfRpt::XT($ep)
-            $q = $PerfRpt::GD($t, $r, 'cpu_quota_cores'); $vals[$cQ - 1] = $q; if ($null -ne $q) { $quota = $q }
-            $mu = $PerfRpt::MB(($PerfRpt::GD($t, $r, 'memory_usage_bytes'))); $ml = $PerfRpt::MB(($PerfRpt::GD($t, $r, 'memory_limit_bytes'))); if ($null -ne $ml) { $mlim = $ml }
-            $vals[$cMu - 1] = $mu; $vals[$cMl - 1] = $ml; $mp2 = $PerfRpt::Div($mu, $ml); $vals[$cMp - 1] = $PerfRpt::Rnd($mp2, 4)
-            $vals[$cMa - 1] = $PerfRpt::MB(($PerfRpt::GD($t, $r, 'memory_anon_bytes'))); $vals[$cMf - 1] = $PerfRpt::MB(($PerfRpt::GD($t, $r, 'memory_file_bytes')))
-            $vals[$cPc - 1] = $PerfRpt::GD($t, $r, 'pids_current'); $vals[$cVv - 1] = $PerfRpt::G($t, $r, 'cgroup_version')
-            if ($null -ne $p) {
-                $el = $ep - ($PerfRpt::GD($t, $p, 'epoch'))
-                if ($el -gt 0) {
-                    $du = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'cpu_usage_usec')), ($PerfRpt::GD($t, $p, 'cpu_usage_usec')))
-                    if ($null -ne $du) { $cu = $du / ($el * 1000000.0) * 100; $vals[$cCu - 1] = $PerfRpt::Rnd($cu, 1); $PerfRpt::AddV($lCu, $cu); if ($null -ne $q -and $q -gt 0) { $qr = $cu / ($q * 100); $vals[$cQr - 1] = $PerfRpt::Rnd($qr, 4); $PerfRpt::AddV($lQr, $qr)} }
-                }
-                $tn = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'cpu_nr_throttled')), ($PerfRpt::GD($t, $p, 'cpu_nr_throttled'))); $vals[$cTn - 1] = $tn; if ($null -ne $tn) { $thN += $tn }
-                $tt = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'cpu_throttled_usec')), ($PerfRpt::GD($t, $p, 'cpu_throttled_usec'))); if ($null -ne $tt) { $vals[$cTt - 1] = $PerfRpt::Rnd(($tt / 1000), 1); $thT += $tt / 1000 }
-                $np = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'cpu_nr_periods')), ($PerfRpt::GD($t, $p, 'cpu_nr_periods'))); $vals[$cTr - 1] = $PerfRpt::Rnd(($PerfRpt::Div($tn, $np)), 4)
-                $oo = $PerfRpt::Dl(($PerfRpt::GD($t, $r, 'memory_oom_kill')), ($PerfRpt::GD($t, $p, 'memory_oom_kill'))); $vals[$cOo - 1] = $oo; if ($null -ne $oo) { $oom += $oo }
-            }
-            $PerfRpt::AddV($lMu, $mu); $PerfRpt::AddV($lMp, $mp2)
-            Add-Row $sh $vals ''
             $p = $r
         }
-        Fix-Ranges $sh; $Sheets.Add($sh); $shCg = $sh
-        $KPI['cgCpu'] = Stat $lCu; $KPI['cgQr'] = Stat $lQr; $KPI['cgMem'] = Stat $lMu; $KPI['cgMemP'] = Stat $lMp; $KPI['cgThN'] = $thN; $KPI['cgThT'] = $thT; $KPI['cgOom'] = $oom; $KPI['cgQuota'] = $quota; $KPI['cgLimit'] = $mlim
-        $script:CGRC = @{ Cu = $cCu; Q = $cQ; Mu = $cMu; Ml = $cMl; Tn = $cTn }
+        Fix-Ranges $sh; $Sheets.Add($sh); $shJS = $sh
+        $elapsed = ($PerfRpt::GD($t, $t.Rows[$t.Rows.Count - 1], 'epoch')) - ($PerfRpt::GD($t, $t.Rows[0], 'epoch'))
+        $KPI['jsHeap'] = Stat $lHu; $KPI['jsOld'] = Stat $lOu; $KPI['jsOldP'] = Stat $lOp; $KPI['jsMeta'] = Stat $lMu; $KPI['jsYa'] = Stat $lYa
+        $KPI['jsY'] = $ygS; $KPI['jsYt'] = $ytS; $KPI['jsF'] = $fgS; $KPI['jsFt'] = $ftS; $KPI['jsC'] = $cS; $KPI['jsGt'] = $gtS; $KPI['jsEl'] = $elapsed; $KPI['jsHcMax'] = $PerfRpt::KBtoMB($hcMax)
+        $script:JSC = @{ Hu = $cHu; Hc = $cHc; Eu = $cEu; Ou = $cOu; Mu = $cMu; Mc = $cMc; Cu = $cCu; Yn = $cYn; Fn = $cFn; Cn = $cCn; Yt = $cYt; Ft = $cFt; Gt = $cGt }
     }
 
     # ==== 所見 ====
     function AddF([int]$lv, [string]$cat, [string]$msg) { $Find.Add(@($lv, $cat, $msg)) }
     foreach ($d in $dsSum) {
-        if ($d.Fail -gt 0) { AddF 3 'DB 接続プール' ('「' + $d.Name + '」で接続の取得失敗 (タイムアウト) が ' + $d.Fail.ToString('#,0') + ' 件ありました。アプリでは IJ000453 等の例外になります。最大プール (' + $d.Max + ') と、接続を保持している処理 (スレッドダンプ) を確認してください。') }
+        if ($d.Fail -gt 0) { AddF 3 'DB 接続プール' ('「' + $d.Name + '」で接続の取得失敗 (タイムアウト) が ' + $d.Fail.ToString('#,0') + ' 件ありました。アプリでは IJ000453 等の例外になります。最大プール (' + $d.Max + ') と、接続を長く保持している処理を確認してください。') }
         if ($d.AtMax -gt 0) { AddF 2 'DB 接続プール' ('「' + $d.Name + '」の使用中が最大プール (' + $d.Max + ') に達しました (' + $d.AtMax + ' / ' + $d.N + ' 回)。') }
         if ($d.Wait -gt 0) { AddF 2 'DB 接続プール' ('「' + $d.Name + '」で空き接続の待ちが ' + $d.Wait.ToString('#,0') + ' 件発生しました (最大待ち時間 ' + $(if ($null -ne $d.MaxWait) { $d.MaxWait.ToString('#,0') } else { '-' }) + ' ms)。') }
         elseif ($null -ne $d.Us -and $d.Us.Max -ge 0.8) { AddF 1 'DB 接続プール' ('「' + $d.Name + '」の使用率が最大 ' + ($d.Us.Max * 100).ToString('0') + '% まで上がりました (待ちは発生していません)。') }
         if ($d.StatsOff) { AddF 1 'DB 接続プール' ('「' + $d.Name + '」のプール統計が無効です。値は 0 のままになります。') }
     }
-    if ($null -ne $KPI['ioMax'] -and $KPI['ioFullN'] -gt 0) {
-        $qm = $(if ($null -ne $KPI['ioq']) { $KPI['ioq'].Max } else { 0 })
-        AddF 2 'リクエスト処理' ('IO ワーカーの処理中スレッドが最大 (' + $KPI['ioMax'] + ') に達しました (' + $KPI['ioFullN'] + ' 回、キュー最大 ' + $qm + ')。リクエストが処理待ちになっています。task-max-threads と DB 接続待ちの有無を確認してください。')
-    }
-    if ($null -ne $KPI['errTot'] -and $KPI['errTot'] -gt 0) { AddF 1 'HTTP' ('HTTP エラー (error-count) が ' + $KPI['errTot'].ToString('#,0') + ' 件ありました (全リクエスト ' + $KPI['reqTot'].ToString('#,0') + ' 件)。') }
     if ($KPI.ContainsKey('jsF') -and $KPI['jsF'] -gt 0) { AddF 3 'GC' ('Full GC が ' + $KPI['jsF'] + ' 回発生しました (合計 ' + ($KPI['jsFt'] * 1000).ToString('#,0') + ' ms)。ヒープ不足・メタスペース不足・System.gc() を確認してください。') }
     if ($null -ne $KPI['jsOldP'] -and $KPI['jsOldP'].Max -ge 0.85) { AddF 2 'ヒープ' ('Old 領域の使用率が最大 ' + ($KPI['jsOldP'].Max * 100).ToString('0') + '% に達しました。') }
     if ($KPI.ContainsKey('jsEl') -and $KPI['jsEl'] -gt 0) {
         $ratio = $KPI['jsGt'] / $KPI['jsEl']
         if ($ratio -ge 0.05) { AddF 2 'GC' ('期間中の GC 時間率が ' + ($ratio * 100).ToString('0.0') + '% です (目安 5% 未満)。') }
     }
-    if ($KPI.ContainsKey('cgThN') -and $KPI['cgThN'] -gt 0) { AddF 2 'CPU' ('CPU スロットリングが ' + $KPI['cgThN'].ToString('#,0') + ' 回 (合計 ' + ($KPI['cgThT'] / 1000).ToString('#,0.0') + ' 秒) 発生しました。タスクの CPU 上限 (' + $KPI['cgQuota'] + ' vCPU) に当たっています。') }
-    if ($null -ne $KPI['cgQr'] -and $KPI['cgQr'].Avg -ge 0.8) { AddF 2 'CPU' ('コンテナの CPU 使用率が平均で上限の ' + ($KPI['cgQr'].Avg * 100).ToString('0') + '% です。') }
-    if ($KPI.ContainsKey('cgOom') -and $KPI['cgOom'] -gt 0) { AddF 3 'メモリ' ('OOM kill が ' + $KPI['cgOom'] + ' 回発生しました。') }
-    if ($null -ne $KPI['cgMemP'] -and $KPI['cgMemP'].Max -ge 0.9) { AddF 2 'メモリ' ('コンテナのメモリ使用率が最大 ' + ($KPI['cgMemP'].Max * 100).ToString('0') + '% に達しました (上限 ' + $KPI['cgLimit'] + ' MB)。') }
-    if ($null -ne $KPI['ovhCpu'] -and $KPI['ovhCpu'].Avg -ge 5) { AddF 1 '収集の負荷' ('収集プロセスの CPU が平均 ' + $KPI['ovhCpu'].Avg.ToString('0.0') + '% (1 コア = 100%) です。間隔を長くすると負荷を下げられます。') }
-    if ($Find.Count -eq 0) { AddF 0 '全般' '特記事項はありません (接続プールの待ち・取得失敗、Full GC、CPU スロットリング、メモリの逼迫は検出されませんでした)。' }
+    if ($Find.Count -eq 0) { AddF 0 '全般' '特記事項はありません (接続プールの待ち・取得失敗・上限到達、Full GC、Old 領域・GC 時間の逼迫は検出されませんでした)。' }
 
     # ==== グラフ ====
-    if ($null -ne $shHT) {
-        Add-ChartSection 'HTTP・リクエスト処理スレッド'
-        $c = $script:HTC
-        Add-Chart 'スループット（リクエスト/秒・エラー/秒）' '件/秒' '#,##0' @((Sr 'リクエスト/秒' $shHT $c.Rps $null), (Sr 'エラー/秒' $shHT $c.Eps $null)) ''
-        Add-Chart 'リクエスト処理スレッド（IO ワーカー）' 'スレッド数' '#,##0' @((Sr '処理中' $shHT $c.Ib $null), (Sr '最大' $shHT $c.Im $null), (Sr 'キュー' $shHT $c.Iq $null), (Sr 'アクティブ要求' $shHT $c.Ar $null)) ''
-        if ($null -ne $KPI['ams']) { Add-Chart '平均処理時間（ミリ秒）' 'ミリ秒' '#,##0.0' @((Sr '平均処理時間' $shHT $c.Ams $null)) '' }
-        Add-Chart 'HTTP セッション（アクティブ）' 'セッション数' '#,##0' @((Sr 'アクティブセッション' $shHT $c.Sa $null)) ''
-    }
     if ($null -ne $shDS) {
         Add-ChartSection 'DB 接続プール'
         $c = $script:DSC
         foreach ($g in $shDS.Groups) {
             $dn = ($g.Key -split "`t")[-1]
-            Add-Chart ($dn + '：接続数') '接続数' '#,##0' @((Sr '使用中' $shDS $c.In $g), (Sr 'アクティブ' $shDS $c.Ac $g), (Sr '最大プール' $shDS $c.Mx $g)) ''
-            Add-Chart ($dn + '：待ち・取得失敗（区間）') '件' '#,##0' @((Sr '待ち' $shDS $c.Wd $g), (Sr '取得失敗' $shDS $c.Fd $g)) ''
+            Add-Chart ($dn + '：接続数') '接続数' '#,##0' @((Sr '使用中' $shDS $c.In $g), (Sr 'アクティブ' $shDS $c.Ac $g), (Sr '最大プール' $shDS $c.Mx $g))
+            Add-Chart ($dn + '：待ち・取得失敗（区間）') '件' '#,##0' @((Sr '待ち' $shDS $c.Wd $g), (Sr '取得失敗' $shDS $c.Fd $g))
         }
     }
-    if ($null -ne $shJS -or $null -ne $shJV) {
-        Add-ChartSection 'ヒープ・GC'
-        if ($null -ne $shJS) {
-            $c = $script:JSC
-            Add-Chart 'ヒープ使用量（jstat、MB）' 'MB' '#,##0' @((Sr '使用（合計）' $shJS $c.Hu $null), (Sr 'Old 使用' $shJS $c.Ou $null), (Sr 'Eden 使用' $shJS $c.Eu $null), (Sr '容量（合計）' $shJS $c.Hc $null)) ''
-            Add-Chart 'GC 回数（区間）' '回' '#,##0' @((Sr 'Young' $shJS $c.Yn $null), (Sr 'Full' $shJS $c.Fn $null), (Sr 'Concurrent' $shJS $c.Cn $null)) ''
-            Add-Chart 'GC 時間（区間、ミリ秒）' 'ミリ秒' '#,##0' @((Sr 'GC 合計' $shJS $c.Gt $null), (Sr 'Young' $shJS $c.Yt $null), (Sr 'Full' $shJS $c.Ft $null)) ''
-            Add-Chart 'メタスペース（MB）' 'MB' '#,##0' @((Sr '使用' $shJS $c.Mu $null), (Sr '容量' $shJS $c.Mc $null), (Sr 'CCS 使用' $shJS $c.Cu $null)) ''
-        }
-        if ($null -ne $shJV) {
-            $c = $script:JVC
-            $ser = @((Sr 'ヒープ使用' $shJV $c.Hu $null), (Sr 'ヒープコミット' $shJV $c.Hc $null), (Sr 'ヒープ最大' $shJV $c.Hm $null))
-            Add-Chart 'ヒープ（platform-mbean、MB）' 'MB' '#,##0' $ser ''
-            if ($null -eq $shJS -and $c.Gc.Count -gt 0) {
-                $ser = @(); foreach ($nm in $c.Gc.Keys) { $ser += Sr ($nm.Replace('_', ' ')) $shJV $c.Gc[$nm][1] $null }
-                Add-Chart 'GC 時間（区間、ミリ秒、platform-mbean）' 'ミリ秒' '#,##0' $ser ''
-            }
-        }
-    }
-    if ($null -ne $shTop -or $null -ne $shCg -or $null -ne $shPs) {
-        Add-ChartSection 'CPU・メモリ・プロセス'
-        $cpuSer = @()
-        if ($null -ne $shTop) { $cpuSer += Sr 'JBoss（top）' $shTop $script:TPC.Jc $null }
-        if ($null -ne $shCg) { $cpuSer += Sr 'コンテナ全体（cgroup）' $shCg $script:CGRC.Cu $null }
-        if ($null -ne $shPs) { $cpuSer += Sr 'JBoss（ps 区間）' $shPs $script:PSC.Cp $null }
-        Add-Chart 'CPU 使用率（1 コア = 100%）' '%' '#,##0' $cpuSer ''
-        $memSer = @()
-        if ($null -ne $shTop) { $memSer += Sr 'JBoss RES（top）' $shTop $script:TPC.Jr $null }
-        if ($null -ne $shCg) { $memSer += Sr 'コンテナ使用量（cgroup）'  $shCg $script:CGRC.Mu $null; $memSer += Sr 'コンテナ上限' $shCg $script:CGRC.Ml $null }
-        Add-Chart 'メモリ（MB）' 'MB' '#,##0' $memSer ''
-        $thrSer = @()
-        if ($null -ne $shPs) { $thrSer += Sr 'OS から見たスレッド数（ps nlwp）' $shPs $script:PSC.Nl $null }
-        if ($null -ne $shHT) { $thrSer += Sr 'JVM スレッド数（platform-mbean）' $shHT $script:HTC.Jt $null }
-        Add-Chart 'JBoss のスレッド数' 'スレッド数' '#,##0' $thrSer ''
-        if ($null -ne $shTop) {
-            Add-Chart 'ロードアベレージ' '' '#,##0.0' @((Sr '1 分' $shTop $script:TPC.L1 $null), (Sr '5 分' $shTop $script:TPC.L5 $null), (Sr '15 分' $shTop $script:TPC.L15 $null)) ''
-            Add-Chart '収集プロセスの CPU（性能試験用、1 コア = 100%）' '%' '#,##0.0' @((Sr 'jboss-cli' $shTop $script:TPC.Kc $null), (Sr 'jstat' $shTop $script:TPC.Sc $null), (Sr 'jcmd' $shTop $script:TPC.Cc $null), (Sr 'スクリプト' $shTop $script:TPC.Pc $null)) ''
-        }
-        if ($null -ne $shCg) { Add-Chart 'CPU スロットリング（区間の回数）' '回' '#,##0' @((Sr 'スロットリング' $shCg $script:CGRC.Tn $null)) '' }
+    if ($null -ne $shJS) {
+        Add-ChartSection 'ヒープ・GC（jstat）'
+        $c = $script:JSC
+        Add-Chart 'ヒープ使用量（MB）' 'MB' '#,##0' @((Sr '使用（合計）' $shJS $c.Hu $null), (Sr 'Old 使用' $shJS $c.Ou $null), (Sr 'Eden 使用' $shJS $c.Eu $null), (Sr '容量（合計）' $shJS $c.Hc $null))
+        Add-Chart 'GC 回数（区間）' '回' '#,##0' @((Sr 'Young' $shJS $c.Yn $null), (Sr 'Full' $shJS $c.Fn $null), (Sr 'Concurrent' $shJS $c.Cn $null))
+        Add-Chart 'GC 時間（区間、ミリ秒）' 'ミリ秒' '#,##0' @((Sr 'GC 合計' $shJS $c.Gt $null), (Sr 'Young' $shJS $c.Yt $null), (Sr 'Full' $shJS $c.Ft $null))
+        Add-Chart 'メタスペース（MB）' 'MB' '#,##0' @((Sr '使用' $shJS $c.Mu $null), (Sr '容量' $shJS $c.Mc $null), (Sr 'CCS 使用' $shJS $c.Cu $null))
     }
 
     # ==== ブックの書き出し ====
     $label = M 'container.log_id'; if ($label -eq '') { $label = Split-Path -Leaf (Split-Path -Parent $dir) }
     $svc = (@((M 'container.service_name'), (M 'container.component_name')) | Where-Object { $_ -ne '' }) -join ' / '
-    $range = ''
-    if ($null -ne $script:TMin) { $range = (SerialText $script:TMin) + ' ～ ' + (SerialText $script:TMax) + '（' + ([TimeSpan]::FromDays($script:TMax - $script:TMin)).ToString('hh\:mm\:ss') + '）' }
+    $range = (SerialText $script:TMin) + ' ～ ' + (SerialText $script:TMax) + '（' + ([TimeSpan]::FromDays($script:TMax - $script:TMin)).ToString('hh\:mm\:ss') + '）'
     $tzNote = $(if ($UseRecordedTime) { 'コンテナで記録した時刻 (UTC' + $uo + ')' } else { 'この PC のタイムゾーン (' + [TimeZoneInfo]::Local.DisplayName + ')' })
     $SheetNames = New-Object System.Collections.Generic.List[string]
     $SheetNames.Add('サマリー'); $SheetNames.Add('グラフ')
@@ -1749,7 +940,7 @@ function Build-Report([string]$dir, [string]$outPath) {
             Write-TableSheet $zip $s $idx
             $idx++
         }
-        Add-TextEntry $zip 'xl/worksheets/sheet1.xml' (Write-SummarySheet 1 $label $svc $range $tzNote $meta $KPI $dsSum $Find $ovh)
+        Add-TextEntry $zip 'xl/worksheets/sheet1.xml' (Write-SummarySheet 1 $label $svc $range $tzNote $meta $KPI $dsSum $Find)
         Write-Info 'グラフを作成しています...'
         Add-TextEntry $zip 'xl/worksheets/sheet2.xml' (Write-ChartsSheet $zip 2 'グラフ' ('グラフ  ' + $svc + '  ' + $label) ('時間軸は全グラフ共通 (' + $range + '、' + $tzNote + ')。モノトーン表示のため線の種類で系列を区別しています (実線 → 破線 → 点線 → 長破線 の順)。元データは各シートにあります。'))
         $nChart = $script:NCH
@@ -1816,7 +1007,7 @@ function Add-TextEntry([System.IO.Compression.ZipArchive]$zip, [string]$name, [s
 # サマリーシート
 #------------------------------------------------------------------------------
 function Fmt($v, [string]$f) { if ($null -eq $v) { return '－' }; return ([double]$v).ToString($f, $Inv) }
-function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [string]$range, [string]$tzNote, $meta, $KPI, $dsSum, $Find, $ovh) {
+function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [string]$range, [string]$tzNote, $meta, $KPI, $dsSum, $Find) {
     function M2([string]$k) { if ($meta.Contains($k)) { return [string]$meta[$k] }; return '' }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append((Ws-Begin 'FF000000' $true 0 0 $true 90))
@@ -1848,38 +1039,22 @@ function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [strin
     $cells = ''; for ($i = 0; $i -lt 8; $i++) { $cells += StrC ($COLN[$i + 1] + $r) $hd[$i] $S_HDR }
     [void]$sb.Append((Row $r $cells 20)); $r++
     $kp = New-Object System.Collections.Generic.List[object]
-    function KRow([string]$cat, [string]$name, $st, [string]$unit, [string]$note, [double]$scale, [string]$fmt) { $kp.Add(@($cat, $name, $st, $unit, $note, $scale, $fmt)) }
+    # KRow: 時系列の統計 (最大 / 95% 値 / 平均 / 最小)、KOne: 期間全体の値 1 つ
+    function KRow([string]$cat, [string]$name, $st, [string]$unit, [string]$note, [string]$fmt) { $kp.Add(@($cat, $name, $st, $unit, $note, 1, $fmt)) }
     function KOne([string]$cat, [string]$name, $v, [string]$unit, [string]$note, [string]$fmt) { $kp.Add(@($cat, $name, $v, $unit, $note, 0, $fmt)) }
-    if ($null -ne $KPI['rps']) { KRow 'HTTP' 'スループット' $KPI['rps'] '件/秒' ('期間中のリクエスト ' + (Fmt $KPI['reqTot'] '#,0') + ' 件・エラー ' + (Fmt $KPI['errTot'] '#,0') + ' 件') 1 'dec1' }
-    if ($null -ne $KPI['ams']) { KRow 'HTTP' '平均処理時間' $KPI['ams'] 'ミリ秒' '取得間隔ごとの平均 (Undertow processing-time)' 1 'dec1' }
-    if ($null -ne $KPI['iob']) { KRow 'リクエスト処理' 'IO ワーカー 処理中スレッド' $KPI['iob'] 'スレッド' ('最大 ' + (Fmt $KPI['ioMax'] '#,0') + ' スレッド') 1 'int' }
-    if ($null -ne $KPI['ioq']) { KRow 'リクエスト処理' 'IO ワーカー キュー' $KPI['ioq'] '件' '処理待ちのタスク' 1 'int' }
-    if ($null -ne $KPI['ses']) { KRow 'HTTP' 'アクティブセッション' $KPI['ses'] '件' '' 1 'int' }
     foreach ($d in $dsSum) {
-        if ($null -ne $d.In) { KRow 'DB 接続プール' ($d.Name + ' 使用中') $d.In '接続' ('最大プール ' + $d.Max + '・待ち ' + (Fmt $d.Wait '#,0') + ' 件・取得失敗 ' + (Fmt $d.Fail '#,0') + ' 件') 1 'int' }
+        KRow 'DB 接続プール' ($d.Name + ' 使用中') $d.In '接続' ('最大プール ' + $d.Max + '・待ち ' + (Fmt $d.Wait '#,0') + ' 件・取得失敗 ' + (Fmt $d.Fail '#,0') + ' 件') 'int'
     }
-    if ($null -ne $KPI['jsHeap']) { KRow 'ヒープ（jstat）' 'ヒープ使用量' $KPI['jsHeap'] 'MB' ('容量 最大 ' + (Fmt $KPI['jsHcMax'] '#,0') + ' MB' + $(if ($meta.Contains('jvm_flag.MaxHeapSize')) { '・最大ヒープ ' + (Fmt ([double]$meta['jvm_flag.MaxHeapSize'] / 1048576) '#,0') + ' MB' } else { '' })) 1 'dec1' }
-    if ($null -ne $KPI['jsOld']) { KRow 'ヒープ（jstat）' 'Old 使用量' $KPI['jsOld'] 'MB' ('Old 使用率 最大 ' + (Fmt ($KPI['jsOldP'].Max * 100) '0.0') + '%') 1 'dec1' }
-    if ($null -ne $KPI['jsMeta']) { KRow 'ヒープ（jstat）' 'メタスペース使用量' $KPI['jsMeta'] 'MB' '' 1 'dec1' }
+    if ($null -ne $KPI['jsHeap']) { KRow 'ヒープ（jstat）' 'ヒープ使用量' $KPI['jsHeap'] 'MB' ('容量 最大 ' + (Fmt $KPI['jsHcMax'] '#,0') + ' MB') 'dec1' }
+    if ($null -ne $KPI['jsOld']) { KRow 'ヒープ（jstat）' 'Old 使用量' $KPI['jsOld'] 'MB' ('Old 使用率 最大 ' + (Fmt ($KPI['jsOldP'].Max * 100) '0.0') + '%') 'dec1' }
+    if ($null -ne $KPI['jsMeta']) { KRow 'ヒープ（jstat）' 'メタスペース使用量' $KPI['jsMeta'] 'MB' '' 'dec1' }
     if ($KPI.ContainsKey('jsY')) {
         $gr = $(if ($KPI['jsEl'] -gt 0) { $KPI['jsGt'] / $KPI['jsEl'] * 100 } else { $null })
         KOne 'GC（jstat）' 'Young GC 回数 / 合計時間' $KPI['jsY'] '回' ('合計 ' + (Fmt ($KPI['jsYt'] * 1000) '#,0') + ' ms・平均停止 ' + $(if ($null -ne $KPI['jsYa']) { (Fmt $KPI['jsYa'].Avg '0.0') + ' ms (最大 ' + (Fmt $KPI['jsYa'].Max '0.0') + ' ms)' } else { '－' })) 'int'
         KOne 'GC（jstat）' 'Full GC 回数 / 合計時間' $KPI['jsF'] '回' ('合計 ' + (Fmt ($KPI['jsFt'] * 1000) '#,0') + ' ms') 'int'
         KOne 'GC（jstat）' 'Concurrent GC 回数' $KPI['jsC'] '回' 'G1 の並行マーキング等' 'int'
         KOne 'GC（jstat）' 'GC 時間率（期間全体）' $gr '%' ('GC 時間 ' + (Fmt ($KPI['jsGt']) '#,0.00') + ' 秒 ÷ 経過 ' + (Fmt $KPI['jsEl'] '#,0') + ' 秒') 'dec2'
-    } elseif ($null -ne $KPI['cliGc']) {
-        foreach ($nm in $KPI['cliGc'].Keys) { KOne 'GC（CLI）' ($nm.Replace('_', ' ') + ' 回数') $KPI['cliGc'][$nm][0] '回' ('合計 ' + (Fmt $KPI['cliGc'][$nm][1] '#,0') + ' ms') 'int' }
     }
-    if ($null -ne $KPI['cliHeap'] -and $null -eq $KPI['jsHeap']) { KRow 'ヒープ（CLI）' 'ヒープ使用量' $KPI['cliHeap'] 'MB' ('最大ヒープ ' + (Fmt $KPI['cliHeapMax'] '#,0') + ' MB') 1 'dec1' }
-    if ($null -ne $KPI['jthr']) { KRow 'JVM' 'スレッド数' $KPI['jthr'] 'スレッド' 'platform-mbean' 1 'int' }
-    if ($null -ne $KPI['jbCpu']) { KRow 'CPU（top）' 'JBoss の %CPU' $KPI['jbCpu'] '%' '1 コア = 100%' 1 'dec1' }
-    if ($null -ne $KPI['cgCpu']) { KRow 'CPU（cgroup）' 'コンテナの CPU 使用率' $KPI['cgCpu'] '%' ('1 vCPU = 100%・上限 ' + (Fmt $KPI['cgQuota'] '0.00') + ' vCPU・スロットリング ' + (Fmt $KPI['cgThN'] '#,0') + ' 回') 1 'dec1' }
-    if ($null -ne $KPI['sysCpu']) { KRow 'CPU（top）' '全体の CPU 使用率' $KPI['sysCpu'] '%' '全 CPU に対する割合 (100 - idle)' 1 'dec1' }
-    if ($null -ne $KPI['load1']) { KRow 'CPU（top）' 'ロードアベレージ（1 分）' $KPI['load1'] '' '' 1 'dec2' }
-    if ($null -ne $KPI['jbRes']) { KRow 'メモリ（top）' 'JBoss の RES' $KPI['jbRes'] 'MB' '' 1 'dec1' }
-    if ($null -ne $KPI['cgMem']) { KRow 'メモリ（cgroup）' 'コンテナのメモリ使用量' $KPI['cgMem'] 'MB' ('上限 ' + (Fmt $KPI['cgLimit'] '#,0') + ' MB・OOM kill ' + (Fmt $KPI['cgOom'] '#,0') + ' 回') 1 'dec1' }
-    if ($null -ne $KPI['psNl']) { KRow 'プロセス（ps）' 'JBoss のスレッド数' $KPI['psNl'] 'スレッド' '' 1 'int' }
-    if ($null -ne $KPI['clims']) { KRow '収集' 'jboss-cli 1 回の応答時間' $KPI['clims'] 'ミリ秒' '① の全項目を取得する時間' 1 'int' }
     foreach ($k in $kp) {
         $cells = (StrC ('A' + $r) $k[0] $S_KEY) + (StrC ('B' + $r) $k[1] $S_TEXT)
         $st = $FMTS[$k[6]]
@@ -1906,8 +1081,8 @@ function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [strin
         foreach ($d in $dsSum) {
             $cells = (StrC ('A' + $r) $d.Name $S_KEY)
             $cells += StrC ('B' + $r) ((Fmt $(if ($null -ne $d.In) { $d.In.Max } else { $null }) '#,0') + ' / ' + (Fmt $d.Max '#,0')) $S_TEXTC
-            $cells += NumC ('C' + $r) $(if ($null -ne $d.Us) { $PerfRpt::Rnd($d.Us.Max, 4)} else { $null }) $S_PCTB
-            $cells += NumC ('D' + $r) $(if ($null -ne $d.Us) { $PerfRpt::Rnd($d.Us.Avg, 4)} else { $null }) $S_PCT
+            $cells += NumC ('C' + $r) $(if ($null -ne $d.Us) { $PerfRpt::Rnd($d.Us.Max, 4) } else { $null }) $S_PCTB
+            $cells += NumC ('D' + $r) $(if ($null -ne $d.Us) { $PerfRpt::Rnd($d.Us.Avg, 4) } else { $null }) $S_PCT
             $cells += NumC ('E' + $r) $d.Wait $(if ($d.Wait -gt 0) { $S_INTB } else { $S_INT })
             $cells += NumC ('F' + $r) $d.Fail $(if ($d.Fail -gt 0) { $S_INTB } else { $S_INT })
             $cells += NumC ('G' + $r) $d.MaxWait $S_INT
@@ -1917,46 +1092,13 @@ function Write-SummarySheet([int]$sheetIdx, [string]$label, [string]$svc, [strin
         $r++
     }
 
-    # --- HTTP リスナー別 ---
-    if ($null -ne $KPI['lsn'] -and $KPI['lsn'].Count -gt 0) {
-        [void]$sb.Append((Row $r (StrC ('A' + $r) '■ HTTP リスナー別のリクエスト数（期間中）' $S_SEC) 20)); $r++
-        [void]$sb.Append((Row $r ((StrC ('A' + $r) 'リスナー' $S_HDR) + (StrC ('B' + $r) 'サーバー / 種別 / 名前' $S_HDR) + (StrC ('C' + $r) 'リクエスト' $S_HDR)) 20)); $r++
-        foreach ($k in $KPI['lsn'].Keys) {
-            $p = $k.Split('/')
-            [void]$sb.Append((Row $r ((StrC ('A' + $r) $p[2] $S_KEY) + (StrC ('B' + $r) $k $S_TEXT) + (NumC ('C' + $r) $KPI['lsn'][$k] $S_INT)) 0)); $r++
-        }
-        $r++
-    }
-
-    # --- 収集プロセスの負荷 ---
-    if ($ovh.Count -gt 0) {
-        [void]$sb.Append((Row $r (StrC ('A' + $r) '■ 収集プロセスの負荷（性能試験用。結果を読むときの補正の目安）' $S_SEC) 20)); $r++
-        $hd = @('プロセス', '内容', '平均 %CPU', '最大 %CPU', '最大 RES MB', '', '', '備考')
-        $cells = ''; for ($i = 0; $i -lt 8; $i++) { $cells += StrC ($COLN[$i + 1] + $r) $hd[$i] $S_HDR }
-        [void]$sb.Append((Row $r $cells 20)); $r++
-        $desc = @{ 'jboss-cli' = '① jboss-cli 常駐セッション (JVM)'; 'jstat' = '② jstat 常駐 (JVM)'; 'jcmd' = '② jcmd (間隔ごとに起動)'; 'perf-metrics' = '収集スクリプト (sh / awk)'; 'top' = '③ top'; 'ps' = '③ ps' }
-        foreach ($rl in @('jboss-cli', 'jstat', 'jcmd', 'perf-metrics', 'top', 'ps')) {
-            if (-not $ovh.ContainsKey($rl)) { continue }
-            $sc = Stat $ovh[$rl][0]; $sm = Stat $ovh[$rl][1]
-            $cells = (StrC ('A' + $r) $rl $S_KEY) + (StrC ('B' + $r) $desc[$rl] $S_TEXT)
-            $cells += NumC ('C' + $r) $(if ($null -ne $sc) { $PerfRpt::Rnd($sc.Avg, 2)} else { $null }) $S_DEC2
-            $cells += NumC ('D' + $r) $(if ($null -ne $sc) { $PerfRpt::Rnd($sc.Max, 1)} else { $null }) $S_DEC1
-            $cells += NumC ('E' + $r) $(if ($null -ne $sm) { $PerfRpt::Rnd($sm.Max, 1)} else { $null }) $S_DEC1
-            $cells += (EmptyC ('F' + $r) $S_TEXT) + (EmptyC ('G' + $r) $S_TEXT) + (StrC ('H' + $r) '1 コア = 100%' $S_TEXT)
-            [void]$sb.Append((Row $r $cells 0)); $r++
-        }
-        $r++
-    }
-
     # --- 収集情報 (抜粋) ---
     [void]$sb.Append((Row $r (StrC ('A' + $r) '■ 収集情報（抜粋。全項目は「収集情報」シート）' $S_SEC) 20)); $r++
     $items = @(
-        @('サービス', $svc), @('タスク (LOG_ID)', $label), @('ホスト名', (M2 'container.hostname')), @('ECS タスク', (M2 'ecs.TaskARN')),
-        @('タスクの上限', (M2 'ecs.TaskLimits')), @('JBoss EAP', ((M2 'jboss.product-name') + ' ' + (M2 'jboss.product-version'))), @('JVM', ((M2 'jboss.vm-name') + ' ' + (M2 'jboss.vm-version'))),
-        @('GC', $(if ((M2 'jvm_flag.UseG1GC') -eq 'true') { 'G1' } elseif ((M2 'jvm_flag.UseParallelGC') -eq 'true') { 'Parallel' } elseif ((M2 'jvm_flag.UseSerialGC') -eq 'true') { 'Serial' } elseif ((M2 'jvm_flag.UseZGC') -eq 'true') { 'Z' } else { '' })),
-        @('最大ヒープ', $(if ((M2 'jvm_flag.MaxHeapSize') -ne '') { ([double](M2 'jvm_flag.MaxHeapSize') / 1048576).ToString('#,0', $Inv) + ' MB' } else { '' })),
-        @('JVM が使える CPU', (M2 'jboss.available-processors')), @('収集間隔 (秒)', ('jboss-cli ' + (M2 'perf.cli_interval') + ' / jstat ' + (M2 'perf.jstat_interval') + ' / jcmd ' + (M2 'perf.jcmd_interval') + ' / top ' + (M2 'perf.top_interval') + ' / ps ' + (M2 'perf.ps_interval'))),
-        @('出力先', (M2 'perf.output_dir')), @('収集開始', (M2 'perf.start_time') + ' (コンテナの時刻、UTC' + (M2 'perf.utc_offset') + ')')
+        @('サービス', $svc), @('タスク (LOG_ID)', $label), @('ホスト名', (M2 'container.hostname')),
+        @('収集間隔 (秒)', ('jboss-cli ' + (M2 'perf.cli_interval') + ' / jstat ' + (M2 'perf.jstat_interval'))),
+        @('jboss-cli の接続先', (M2 'cli.controller')), @('jstat の起動方法', (M2 'jvm.jstat_command')),
+        @('出力先', (M2 'perf.output_dir')), @('収集開始', ((M2 'perf.start_time') + ' (コンテナの時刻、UTC' + (M2 'perf.utc_offset') + ')'))
     )
     foreach ($it in $items) {
         if ([string]::IsNullOrWhiteSpace($it[1]) -or $it[1].Trim() -eq '/') { continue }
@@ -1979,7 +1121,7 @@ function Write-MetaSheet([int]$sheetIdx, $meta) {
     [void]$sb.Append((Ws-Begin 'FF7F7F7F' $true 0 4 $false 90))
     [void]$sb.Append('<cols><col min="1" max="1" width="14" customWidth="1"/><col min="2" max="2" width="34" customWidth="1"/><col min="3" max="3" width="90" customWidth="1"/><col min="4" max="4" width="28" customWidth="1"/></cols><sheetData>')
     [void]$sb.Append((Row 1 (StrC 'A1' '収集情報' $S_TITLE) 24))
-    [void]$sb.Append((Row 2 (StrC 'A2' 'perf_meta.csv の内容です (収集開始時の環境・条件と、jboss-cli / jcmd が取得したサーバー・JVM の情報)。' $S_NOTE) 0))
+    [void]$sb.Append((Row 2 (StrC 'A2' 'perf_meta.csv の内容です (収集開始時の環境・条件と、jboss-cli / jstat の接続先・起動方法)。' $S_NOTE) 0))
     [void]$sb.Append((Row 4 ((StrC 'A4' '分類' $S_HDR) + (StrC 'B4' '項目' $S_HDR) + (StrC 'C4' '値' $S_HDR) + (StrC 'D4' 'キー' $S_HDR)) 20))
     $r = 5
     foreach ($k in $meta.Keys) {
@@ -1987,7 +1129,6 @@ function Write-MetaSheet([int]$sheetIdx, $meta) {
         $cl = $MetaCat[$cat]; if ($null -eq $cl) { $cl = $cat }
         $lb = $MetaLabel[$k]; if ($null -eq $lb) { $lb = $k.Substring($cat.Length + 1) }
         $v = [string]$meta[$k]
-        if ($k -eq 'jboss.jvm-start-time' -and $NumRe.IsMatch($v)) { $v = $v + '  (' + (SerialText ($PerfRpt::XT(([double]$v / 1000)))) + ')' }
         [void]$sb.Append((Row $r ((StrC ('A' + $r) $cl $S_KEY) + (StrC ('B' + $r) $lb $S_TEXT) + (StrC ('C' + $r) $v $S_WRAP) + (StrC ('D' + $r) $k $S_MUTED)) (WrapHt $v 88)))
         $r++
     }
@@ -2007,12 +1148,9 @@ P|・「区間」は前回の取得からの増分です。累計カウンタが
 P|・95% 値は、期間中の取得値を小さい順に並べたときに 95% の位置にある値です。
 B|
 H|収集の方法 (perf-metrics.sh)
-TH|区分|取得方法|主な出力
-T|① jboss-cli|jboss-cli.sh を 1 つ常駐させ (FIFO で命令を送る)、管理モデルを間隔ごとに読む。読み取りだけで設定は変えない (プール統計だけは実行時属性で有効化)|cli_datasource / cli_undertow / cli_session / cli_io_worker / cli_threadpool / cli_transactions / cli_jvm / cli_gc / cli_mempool
-T|② jstat|jstat -gc -t <pid> <間隔> を 1 つ常駐させ、各行に時刻を付ける (runtime イメージに jstat が無い場合は java -m jdk.jcmd で起動)|jvm_jstat_gc
-T|② jcmd|jcmd <pid> GC.heap_info を間隔ごとに実行 (1 回ごとに JVM を起動するため既定 60 秒)。起動時に VM.version / VM.flags|jvm_jcmd_heap / jvm_jcmd.log / jvm_info.txt
-T|③ top|top -b -c (全体) と top -b -H -p <JBoss> (スレッド別) を常駐させる。区間の %CPU が取れる|os_top_summary / os_top_process / os_top_threads / os_top.log
-T|③ ps / cgroup|ps -e -o … と /sys/fs/cgroup を間隔ごとに読む|os_ps / os_cgroup
+TH|区分|取得方法|出力
+T|① jboss-cli|jboss-cli.sh を 1 つ常駐させ (FIFO で命令を送る)、データソース / XA データソースの statistics=pool と最小 / 最大プール等の設定を間隔ごとに読む。読み取りだけで設定は変えない (プール統計だけは実行時属性で有効化)|cli_datasource.csv
+T|② jstat|jstat -gc -t <pid> <間隔> を 1 つ常駐させ、各行に時刻を付ける (runtime イメージに jstat が無い場合は java -m jdk.jcmd で起動)|jvm_jstat_gc.csv
 B|
 H|主な項目
 TH|項目|元の値|説明
@@ -2020,26 +1158,19 @@ T|使用中 / アクティブ / アイドル|InUseCount / ActiveCount / IdleCoun
 T|使用率|InUseCount ÷ 最大プール|最大プール (max-pool-size) が未設定のときは既定値 20 で計算
 T|待ち / 取得失敗|WaitCount / BlockingFailureCount|空き接続を待った取得要求 / 取得タイムアウト (blocking-timeout-wait-millis 超過。アプリでは IJ000453 等)
 T|平均取得 / 最大待ち|AverageGetTime / MaxWaitTime|接続の取得時間 (待ちを含む) / 空きを待った最大時間 (ミリ秒。統計の有効化以降の累積値)
-T|リクエスト/秒|request-count の増分 ÷ 秒|Undertow の全リスナー (http / https / ajp) の合計
-T|平均処理時間|processing-time の増分 ÷ request-count の増分|リスナーの record-request-start-time=true のときだけ値が入る (false なら空欄)
-T|IO ワーカー 処理中 / 最大 / キュー|busy-task-thread-count / max-pool-size / queue-size|リクエストを処理するスレッド (EAP 8 の Undertow は IO ワーカーのタスクスレッドで処理する)。最大に達するとキューで待つ
 T|ヒープ (jstat)|EU + S0U + S1U + OU|Eden・Survivor・Old の使用量の合計。容量は EC + S0C + S1C + OC
 T|GC 時間率|GCT の増分 ÷ 経過秒|アプリが GC で止まっていた時間の割合 (G1 の Concurrent は並行処理の停止部分)。目安 5% 未満
-T|役割 (top / ps)|コマンドラインから判定|jboss = JBoss EAP、jboss-cli / jstat / jcmd = 性能試験用の収集 (目印 -Dperf.metrics.collector 付き)、perf-metrics / top / ps = 収集スクリプト、cli-other / jdk-tool = 手動で実行した jboss-cli / jstat / jcmd
-T|%CPU (top / ps)|1 コア = 100%|複数のコアを使うと 100% を超える。コンテナ全体の CPU は cgroup の使用率 (1 vCPU = 100%) を参照
-T|スロットリング|cpu.stat nr_throttled / throttled_usec|タスクの CPU 上限に当たり、実行を待たされた回数と時間
-T|RES / RSS|top RES / ps rss|プロセスが使っている物理メモリ。JVM はヒープの外 (メタスペース・スレッドスタック・コード) も使う
 B|
 H|所見の判定
 TH|重要度|内容|判定基準
-T|■ 要対応|接続の取得失敗・Full GC・OOM kill|期間中の増分 > 0
-T|▲ 注意|接続待ち・プールの上限到達・IO ワーカーの上限到達・Old 使用率 ≧ 85%・GC 時間率 ≧ 5%・CPU スロットリング・CPU 上限比の平均 ≧ 80%・メモリ使用率 ≧ 90%|期間中に 1 回以上
-T|● 参考|接続プール使用率 ≧ 80% (待ちなし)・HTTP エラー・プール統計が無効・収集プロセスの CPU が平均 5% 以上|－
+T|■ 要対応|接続の取得失敗・Full GC|期間中の増分 > 0
+T|▲ 注意|接続待ち・プールの上限到達・Old 使用率 ≧ 85%・GC 時間率 ≧ 5%|期間中に 1 回以上
+T|● 参考|接続プール使用率 ≧ 80% (待ちなし)・プール統計が無効|－
 B|
 H|注意事項
-P|・収集プロセス (jboss-cli・jstat の JVM など) も同じコンテナの CPU・メモリを使います。サマリーの「収集プロセスの負荷」で量を確認できます。本番と比べる試験では、収集の有無で条件を揃えてください。
-P|・-Dwildfly.statistics-enabled=true (統計の有効化) と、プール統計の実行時有効化によるわずかな負荷があります。
-P|・jstat / jcmd は /tmp が書き込めないと JVM に接続できません。その場合も「JVM・GC（CLI）」シートでヒープ・GC を確認できます。
+P|・収集用の jboss-cli・jstat の JVM も同じコンテナの CPU・メモリを使います (いずれも 1 コアの 1% 未満・RSS 合計 150〜200MB 程度)。本番と比べる試験では、収集の有無で条件を揃えてください。
+P|・-Dwildfly.datasources.statistics-enabled=true (データソースの統計の有効化) と、プール統計の実行時有効化によるわずかな負荷があります。
+P|・jstat は /tmp が書き込めないと JVM の性能カウンタを読めません。その場合は「ヒープ・GC（jstat）」シートが作られません。
 P|・グラフはモノトーンのため、線の種類 (実線・破線・点線・長破線) で系列を区別しています。
 '@
 function Write-LegendSheet([int]$sheetIdx) {

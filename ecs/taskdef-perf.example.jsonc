@@ -3,15 +3,14 @@
 //
 // ★ が性能試験用に足す・変える箇所。それ以外は本番のタスク定義のまま。
 //   - image          : --build-arg PERF_METRICS_ENABLED=true でビルドした性能試験用のタグ
-//   - /tmp           : jstat / jcmd が JVM に接続するために必要 (hsperfdata・アタッチ用ソケット)。
+//   - /tmp           : ② jstat が JBoss の性能カウンタ (/tmp/hsperfdata_*) を読むために必要。
 //                      readonlyRootFilesystem=true では書き込み可能ボリュームを当てないと使えない。
-//                      当てない場合も ① jboss-cli と ③ top / ps は動き、ヒープ・GC は
-//                      cli_jvm.csv / cli_gc.csv で代わりに確認できる。
+//                      当てない場合も ① jboss-cli (DB 接続プール) は動く。
 //   - environment    : 間隔などを変えたいときだけ。何も書かなければイメージの既定
 //                      (ビルド引数 PERF_INTERVAL、無ければ 10 秒) で動く。
 //   - memory         : 収集用の JVM (jboss-cli 常駐 約 120MB・jstat 常駐 約 40MB) の分、
 //                      本番より 200MB 程度の余裕を持たせる (または JVM のヒープ比率を本番と揃える)。
-//   - ECS Exec       : `perf-metrics.sh status` / `threaddump` / `pack` を使う場合は、タスク定義ではなく
+//   - ECS Exec       : `perf-metrics.sh status` / `stop` / `pack` を使う場合は、タスク定義ではなく
 //                      サービス (update-service) または run-task に --enable-execute-command を付ける
 //
 // 出力先: EFS の /mnt/logs/<Component_name>/logs/<Service_Name>/mid/<LOG_ID>/perf/
@@ -33,13 +32,9 @@
       { "name": "CONFIG_SEED_MODE", "value": "overwrite" },
 
       // ★ 任意 (指定しなければイメージの既定)
-      { "name": "PERF_INTERVAL",       "value": "10" },            // ① ② ③ の既定の間隔 (秒)
-      { "name": "PERF_JCMD_INTERVAL",  "value": "60" },            // jcmd GC.heap_info の間隔 (秒)
-      { "name": "PERF_TZ",             "value": "Asia/Tokyo" },    // CSV の timestamp 列のタイムゾーン
-      { "name": "PERF_TOP_THREADS",    "value": "10" }             // JBoss のスレッド別 CPU 上位件数
-      // { "name": "PERF_DURATION",             "value": "7200" }  // 収集を止める秒数 (既定: 停止まで)
-      // { "name": "PERF_THREAD_DUMP_INTERVAL", "value": "300" }   // スレッドダンプの間隔 (既定: 取らない)
-      // { "name": "PERF_METRICS_ENABLED",      "value": "false" } // 性能試験用イメージのまま収集だけ止める
+      { "name": "PERF_INTERVAL",       "value": "10" },            // ① DB 接続プール・② jstat の間隔 (秒)
+      { "name": "PERF_TZ",             "value": "Asia/Tokyo" }     // CSV の timestamp 列のタイムゾーン
+      // { "name": "PERF_METRICS_ENABLED", "value": "false" }      // 性能試験用イメージのまま収集だけ止める
     ],
     "mountPoints": [
       { "sourceVolume": "logs", "containerPath": "/mnt/logs" },
@@ -48,7 +43,7 @@
       { "sourceVolume": "front-jboss-tmp",  "containerPath": "/opt/jboss-eap/standalone/tmp" },
       { "sourceVolume": "front-jboss-data", "containerPath": "/opt/jboss-eap/standalone/data" },
 
-      { "sourceVolume": "front-tmp", "containerPath": "/tmp" }     // ★ jstat / jcmd 用
+      { "sourceVolume": "front-tmp", "containerPath": "/tmp" }     // ★ jstat 用
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
